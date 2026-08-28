@@ -6,6 +6,7 @@ import logging
 import logging.handlers
 import re
 from pathlib import Path
+from typing import Any
 
 _BEARER = re.compile(r"(\bBearer\s+)[^\s,;]+", re.IGNORECASE)
 _SK_SECRET = re.compile(r"\bsk-[A-Za-z0-9][A-Za-z0-9._~+/=-]*")
@@ -15,26 +16,49 @@ _ESCAPED_JSON_STRING = re.compile(r'(?i)((?:\\)?["\']api_key(?:\\)?["\']\s*:\s*)
 
 def redact(text: str) -> str:
     """Replace credential values while preserving surrounding message structure."""
-    result = text
-    decoder = json.JSONDecoder()
-    offset = 0
-    while True:
-        match = _JSON_API_KEY.search(result, offset)
-        if match is None:
-            break
-        value_start = match.end()
-        while value_start < len(result) and result[value_start].isspace():
-            value_start += 1
-        try:
-            _, consumed = decoder.raw_decode(result[value_start:])
-        except json.JSONDecodeError:
-            offset = value_start
-            continue
-        result = result[:value_start] + '"[REDACTED]"' + result[value_start + consumed:]
-        offset = value_start + len('"[REDACTED]"')
-    result = _ESCAPED_JSON_STRING.sub(r'\1\2[REDACTED]\2', result)
+    result = _redact_json_fragments(text)
+    result = _ESCAPED_JSON_STRING.sub(r"\1\2[REDACTED]\2", result)
     result = _BEARER.sub(r"\1[REDACTED]", result)
     return _SK_SECRET.sub("[REDACTED]", result)
+
+
+def _sanitize_json(value: Any, depth: int = 0) -> Any:
+    if depth > 20:
+        return "[REDACTED]"
+    if isinstance(value, dict):
+        return {
+            key: "[REDACTED]" if key.casefold() == "api_key" else _sanitize_json(item, depth + 1)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_sanitize_json(item, depth + 1) for item in value]
+    if isinstance(value, str):
+        return _redact_json_fragments(value, depth + 1)
+    return value
+
+
+def _redact_json_fragments(text: str, depth: int = 0) -> str:
+    if depth > 20:
+        return "[REDACTED]"
+    decoder = json.JSONDecoder()
+    result: list[str] = []
+    cursor = 0
+    index = 0
+    while index < len(text):
+        if text[index] not in "[{":
+            index += 1
+            continue
+        try:
+            value, consumed = decoder.raw_decode(text[index:])
+        except json.JSONDecodeError:
+            index += 1
+            continue
+        result.append(text[cursor:index])
+        result.append(json.dumps(_sanitize_json(value, depth), ensure_ascii=False, separators=(",", ":")))
+        cursor = index + consumed
+        index = cursor
+    result.append(text[cursor:])
+    return "".join(result)
 
 
 class _RedactionFilter(logging.Filter):
@@ -49,14 +73,14 @@ class _RedactingFormatter(logging.Formatter):
         return redact(super().format(record))
 
 
-_configured: dict[Path, logging.Logger] = {}
+_configured: dict[Path, tuple[logging.Logger, logging.Handler]] = {}
 
 
 def configure_logging(log_dir: Path) -> logging.Logger:
     target_dir = Path(log_dir).resolve()
     existing = _configured.get(target_dir)
     if existing is not None:
-        return existing
+        return existing[0]
     target_dir.mkdir(parents=True, exist_ok=True)
     logger = logging.getLogger(f"xiangqi_agent.diagnostics.{target_dir}")
     logger.setLevel(logging.INFO)
@@ -67,19 +91,20 @@ def configure_logging(log_dir: Path) -> logging.Logger:
     handler.addFilter(_RedactionFilter())
     handler.setFormatter(_RedactingFormatter("%(asctime)s %(levelname)s %(message)s"))
     logger.addHandler(handler)
-    _configured[target_dir] = logger
+    _configured[target_dir] = (logger, handler)
     return logger
 
 
 def shutdown_logging(log_dir: Path | None = None) -> None:
     targets = [Path(log_dir).resolve()] if log_dir is not None else list(_configured)
     for target_dir in targets:
-        logger = _configured.pop(target_dir, None)
-        if logger is None:
+        owned = _configured.pop(target_dir, None)
+        if owned is None:
             continue
-        for handler in logger.handlers[:]:
+        logger, handler = owned
+        if handler in logger.handlers:
             logger.removeHandler(handler)
-            handler.close()
+        handler.close()
 
 
 atexit.register(shutdown_logging)

@@ -18,9 +18,20 @@ def test_redact_api_key_values_of_all_json_forms_without_leaking_nested_values()
     text = '{"api_key": ["nested-secret", {"x": "value"}], "API_KEY": null, "Api_Key": 42}'
     result = redact(text)
     assert "nested-secret" not in result
-    assert '"api_key": "[REDACTED]"' in result
-    assert '"API_KEY": "[REDACTED]"' in result
-    assert '"Api_Key": "[REDACTED]"' in result
+    assert '"api_key":"[REDACTED]"' in result
+    assert '"API_KEY":"[REDACTED]"' in result
+    assert '"Api_Key":"[REDACTED]"' in result
+
+
+def test_redact_decodes_unicode_escaped_json_keys_and_bearer_values() -> None:
+    text = (
+        r'{"api\u005fkey":"encoded-secret","\u0061pi_key":"encoded-prefix-secret",'
+        r'"Authorization":"Bearer\u0020sk-escaped-bearer",'
+        r'"outer":"{\"api_key\":\"embedded-secret\"}"}'
+    )
+    result = redact(text)
+    for secret in ("encoded-secret", "encoded-prefix-secret", "sk-escaped-bearer", "embedded-secret"):
+        assert secret not in result
 
 
 def test_logger_redacts_arguments_and_direct_messages(tmp_path: Path) -> None:
@@ -59,3 +70,13 @@ def test_shutdown_closes_owned_handlers_and_allows_reconfigure(tmp_path: Path) -
     assert handler.stream is None
     reconfigured = configure_logging(tmp_path)
     assert len(reconfigured.handlers) == 1
+
+
+def test_shutdown_leaves_caller_owned_handler_attached(tmp_path: Path) -> None:
+    logger = configure_logging(tmp_path)
+    external = logging.StreamHandler()
+    logger.addHandler(external)
+    shutdown_logging(tmp_path)
+    assert external in logger.handlers
+    external.close()
+    logger.removeHandler(external)
