@@ -10,6 +10,15 @@
 
 **Spec:** docs/superpowers/specs/2026-08-28-xiangqi-learning-agent-design.md
 
+## Milestone Execution Plans
+
+- [M1 Foundation — Tasks 1-8](2026-08-28-m1-foundation.md)
+- [M2 Recognition and Sync — Tasks 9-12](2026-08-28-m2-recognition-sync.md)
+- [M3 Pikafish Analysis — Tasks 13-14](2026-08-28-m3-pikafish-analysis.md)
+- [M4 DeepSeek Coach — Tasks 15-17](2026-08-28-m4-deepseek-coach.md)
+- [M5 Persistence and Release — Tasks 18-21](2026-08-28-m5-release.md)
+- [Milestone index and execution rules](README.md)
+
 ## Global Constraints
 
 - 只支持 Windows 10 1903+ 与 Windows 11 64 位；Python 必须为 >=3.12,<3.13。
@@ -1779,17 +1788,14 @@ git tag -a v0.1.0 -m "Xiangqi learning assistant 0.1.0"
 
 ## Milestone Checkpoints
 
-1. **领域内核完成（Task 1-4）：** 无 GUI、微信、模型或引擎也能完成 FEN、规则、记谱和配置测试。
-2. **可见桌面原型（Task 5-8）：** 能启动独立窗口、选择微信窗口、捕获画面并完成四角标定。
-3. **可靠同步原型（Task 9-12）：** 能从真实天天象棋画面更新镜像棋盘，错误识别不会污染确认局面。
-4. **本地分析原型（Task 13-14）：** 不配置 DeepSeek 也能显示两阶段 Pikafish 形势和前三候选。
-5. **教学助手原型（Task 15-17）：** 能基于结构化证据分级解释、追问和比较用户想法。
-6. **可复盘版本（Task 18-19）：** 棋谱、评分、问答、本地恢复和隐私策略形成闭环。
-7. **可交付版本（Task 20-21）：** Windows 目录版、许可证、十盘真机验收和 0.1.0 发布门全部通过。
+1. **M1 Foundation（Task 1-8）：** 完成领域内核、安全配置、桌面壳、窗口发现、只读捕获和棋盘标定。
+2. **M2 Recognition and Sync（Task 9-12）：** 完成识别资产评估、ONNX 局面识别、多帧稳定和可靠同步。
+3. **M3 Pikafish Analysis（Task 13-14）：** 完成可审计受管引擎与不会显示过期结果的两阶段本地分析。
+4. **M4 DeepSeek Coach（Task 15-17）：** 完成结构化证据、严格校验的 DeepSeek 教练、分级提示和走法比较。
+5. **M5 Persistence and Release（Task 18-21）：** 完成本地复盘、恢复与隐私、Windows 打包、十盘真机验收和 0.1.0 发布门。
 
 ## Execution Notes
 
-- 当前目录尚未初始化 Git，Task 1 才执行 git init；计划文档本身因此尚无提交记录。
 - assets.lock.json 在 Task 9 由实际下载与哈希计算产生，禁止手工填入虚假哈希。
 - Task 9 是识别可靠性的硬门；模型不达标时必须走补充采集和训练分支，不能提前进入 Task 10。
 - Task 13 的 Pikafish 再分发材料和 Task 20 的打包方式必须一起审计；个人本地开发可先使用 .local 目录中的官方二进制。

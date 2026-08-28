@@ -6,8 +6,26 @@
 
 - 建立公开仓库的安全基线和 MIT 许可证。
 - 保留完整产品设计和 21 项详细实施计划。
+- 将完整路线图拆分为五份自包含执行计划，并建立里程碑索引、验收门、`v0.1.0-m1` 至 `v0.1.0-m5` annotated tag 和统一推送门。
+- 将设计说明和完整路线图的实施边界统一为 M1 至 M5 五个里程碑组。
 - 确定 `main` 稳定分支、`develop` 开发分支及 `.worktrees/v0.1` 隔离工作区策略。
 - 确定每个里程碑必须经过测试、独立评审、隐私扫描、推送和 annotated tag。
+
+## 结构验证
+
+2026-08-28 对五份里程碑计划执行结构验证，结果如下：
+
+~~~text
+STRUCTURAL VALIDATION: PASS
+- milestone files: 5/5
+- required sections: 5/5 plans
+- global Task headers: 21/21 exactly once
+- verbatim task bodies: 21/21 exact matches
+- code fences: balanced in 5/5 plans
+- milestone tags: 5/5 exact
+- push gates: 5/5 complete
+- banned markers: 0
+~~~
 
 ## 当前能力
 
