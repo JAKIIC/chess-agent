@@ -129,6 +129,25 @@ def test_external_handler_cannot_leak_after_shutdown_and_reconfigure(tmp_path: P
     external.close()
 
 
+def test_child_logger_cannot_bypass_redaction_after_reconfigure(tmp_path: Path) -> None:
+    logger = configure_logging(tmp_path)
+    stream = io.StringIO()
+    external = logging.StreamHandler(stream)
+    logger.addHandler(external)
+    shutdown_logging(tmp_path)
+    child = configure_logging(tmp_path).getChild("worker")
+    child.error("Bearer child-secret {\"api_key\":\"child-api\"}")
+    try:
+        raise RuntimeError("Bearer " + "child-" + "ex" + "ception {\"api_key\":\"child-" + "ex" + "ception-" + "api" + "\"}")
+    except RuntimeError:
+        child.exception("child failure")
+    output = stream.getvalue()
+    for secret in ("child-secret", "child-api", "child-exception", "child-exception-api"):
+        assert secret not in output
+    logger.removeHandler(external)
+    external.close()
+
+
 def test_repeated_configuration_does_not_duplicate_logger_filters(tmp_path: Path) -> None:
     logger = configure_logging(tmp_path)
     filters = list(logger.filters)

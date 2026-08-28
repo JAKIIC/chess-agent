@@ -173,13 +173,13 @@ def configure_logging(log_dir: Path) -> logging.Logger:
     target_dir = Path(log_dir).resolve()
     existing = _configured.get(target_dir)
     if existing is not None:
+        _ensure_redaction(existing[0])
         return existing[0]
     target_dir.mkdir(parents=True, exist_ok=True)
     logger = logging.getLogger(f"xiangqi_agent.diagnostics.{target_dir}")
     logger.setLevel(logging.INFO)
     logger.propagate = False
-    if not any(isinstance(item, _RedactionFilter) for item in logger.filters):
-        logger.addFilter(_RedactionFilter())
+    _ensure_redaction(logger)
     handler = logging.handlers.RotatingFileHandler(
         target_dir / "xiangqi-agent.log", maxBytes=1_048_576, backupCount=3, encoding="utf-8"
     )
@@ -188,6 +188,15 @@ def configure_logging(log_dir: Path) -> logging.Logger:
     logger.addHandler(handler)
     _configured[target_dir] = (logger, handler)
     return logger
+
+
+def _ensure_redaction(logger: logging.Logger) -> None:
+    filters = [item for item in logger.filters if isinstance(item, _RedactionFilter)]
+    if not filters:
+        logger.addFilter(_RedactionFilter())
+    for handler in logger.handlers:
+        if not any(isinstance(item, _RedactionFilter) for item in handler.filters):
+            handler.addFilter(_RedactionFilter())
 
 
 def shutdown_logging(log_dir: Path | None = None) -> None:
