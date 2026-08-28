@@ -8,36 +8,93 @@ import re
 from pathlib import Path
 from typing import Any
 
-_BEARER_QUOTED = re.compile(r'(\bBearer\s+)"[^"]*"', re.IGNORECASE)
-_BEARER_BRACED = re.compile(r'(\bBearer\s+)\{[^}]*\}', re.IGNORECASE)
-_BEARER_UNMATCHED_QUOTE = re.compile(r'(\bBearer\s+)"(?![^\r\n]*")[^\r\n]*', re.IGNORECASE)
-_BEARER_UNMATCHED_BRACE = re.compile(r'(\bBearer\s+)\{(?![^\r\n]*\})[^\r\n]*', re.IGNORECASE)
-_BEARER = re.compile(r'(\bBearer\s+)[^\s,;"\'{}\[\]]+', re.IGNORECASE)
+_BEARER_WORD = re.compile(r"\bBearer\b", re.IGNORECASE)
 _SK_SECRET = re.compile(r"\bsk-[A-Za-z0-9][A-Za-z0-9._~+/=-]*")
-_JSON_API_KEY = re.compile(r'(?i)(["\']api_key["\']\s*:)')
-_API_KEY_FALLBACK = re.compile(r'(?i)(["\']?api_key["\']?\s*:\s*)([^\r\n]*)')
-_ESCAPED_JSON_STRING = re.compile(r'(?i)((?:\\)?["\']api_key(?:\\)?["\']\s*:\s*)((?:\\)?["\'])(.*?)(?:\\)?["\']')
+_API_KEY_CHAR = r"(?:a|\\u0061)(?:p|\\u0070)(?:i|\\u0069)(?:_|\\u005f)(?:k|\\u006b)(?:e|\\u0065)(?:y|\\u0079)"
+_API_KEY_FALLBACK = re.compile(
+    rf'(?i)((?:["\']|\\u0022|\\u0027)?(?:api_key|{_API_KEY_CHAR})(?:["\']|\\u0022|\\u0027)?\s*:\s*)([^\r\n]*)'
+)
+_API_KEY_LITERAL_FALLBACK = re.compile(r'(?i)(["\']api_key["\']\s*:\s*)([^\r\n]*)')
 
 
 def redact(text: str) -> str:
     """Replace credential values while preserving surrounding message structure."""
-    result = _redact_json_fragments(text)
-    result = _ESCAPED_JSON_STRING.sub(r"\1\2[REDACTED]\2", result)
-    return _redact_surface(result)
+    return _redact_surface(_redact_json_fragments(text))
 
 
 def _redact_surface(text: str) -> str:
-    result = _BEARER_QUOTED.sub(r'\1"[REDACTED]"', text)
-    result = _BEARER_BRACED.sub(r"\1{[REDACTED]}", result)
-    result = _BEARER_UNMATCHED_QUOTE.sub(r'\1"[REDACTED]', result)
-    result = _BEARER_UNMATCHED_BRACE.sub(r"\1{[REDACTED]", result)
-    result = _BEARER.sub(r"\1[REDACTED]", result)
-    result = _API_KEY_FALLBACK.sub(_mask_api_key_fallback, result)
+    result = _redact_bearer_values(text)
+    for _ in range(2):
+        result = _API_KEY_FALLBACK.sub(_mask_api_key_fallback, result)
+        result = _API_KEY_LITERAL_FALLBACK.sub(_mask_api_key_fallback, result)
     return _SK_SECRET.sub("[REDACTED]", result)
+
+
+def _redact_bearer_values(text: str) -> str:
+    result: list[str] = []
+    cursor = 0
+    for match in _BEARER_WORD.finditer(text):
+        if match.start() < cursor:
+            continue
+        position = match.end()
+        while position < len(text):
+            if text[position].isspace():
+                position += 1
+            elif text.startswith("\\u", position) and re.fullmatch(r"[0-9a-fA-F]{4}", text[position + 2 : position + 6]):
+                position += 6
+            elif text.startswith("\\t", position) or text.startswith("\\r", position) or text.startswith("\\n", position):
+                position += 2
+            else:
+                break
+        if position == match.end():
+            continue
+        if text.startswith("[REDACTED]", position):
+            continue
+        end = position
+        opening = text[position:position + 1]
+        if opening in ('"', "'"):
+            end += 1
+            while end < len(text):
+                if text[end] == "\\":
+                    end += 2
+                elif text[end] == opening:
+                    end += 1
+                    if end < len(text) and text[end] not in " \t\r\n,;}]":
+                        end = text.find("\n", end)
+                        end = len(text) if end < 0 else end
+                    break
+                elif text[end] in "\r\n":
+                    break
+                else:
+                    end += 1
+        elif opening in "[{":
+            closing = "]" if opening == "[" else "}"
+            close = text.find(closing, end + 1)
+            end = len(text) if close < 0 else close + 1
+        else:
+            while end < len(text) and text[end] not in "\r\n,;":
+                end += 1
+            while end > position and text[end - 1].isspace():
+                end -= 1
+        result.append(text[cursor:position])
+        if opening in ('"', "'") and end <= len(text) and end > position and text[end - 1] == opening:
+            result.append(opening + "[REDACTED]" + opening)
+        elif opening in "[{" and end <= len(text) and end > position and text[end - 1] == ("]" if opening == "[" else "}"):
+            result.append(opening + "[REDACTED]" + text[end - 1])
+        else:
+            result.append("[REDACTED]")
+        cursor = end
+    result.append(text[cursor:])
+    return "".join(result)
 
 
 def _mask_api_key_fallback(match: re.Match[str]) -> str:
     value = match.group(2).strip()
+    if value.startswith(('"', "'")) and len(value) > 1:
+        quote = value[0]
+        closing = value.find(quote, 1)
+        if closing > 0:
+            return match.group(1) + quote + "[REDACTED]" + value[closing:]
     if re.match(r'^"?\[REDACTED\]"?(?:\s*[,}\]]|\s*$)', value):
         return match.group(0)
     return match.group(1) + "[REDACTED]"

@@ -84,6 +84,30 @@ def test_redact_masks_secrets_after_redacted_marker_prefix() -> None:
         assert "actual-secret" not in redact(text)
 
 
+def test_redact_scans_unicode_malformed_keys_and_bearer_values() -> None:
+    cases = (
+        r'{"api\u005fkey":unquoted-unicode-secret}',
+        r'{"Authorization":"Bearer\u0020truncated-bearer-secret}',
+        r'Authorization: Bearer "prefix\\"escaped-quote-secret',
+        r'{"\u0061\u0070\u0069\u005f\u006b\u0065\u0079":fully-escaped-secret}',
+    )
+    result = redact("\n".join(cases))
+    for secret in ("unquoted-unicode-secret", "truncated-bearer-secret", "escaped-quote-secret", "fully-escaped-secret"):
+        assert secret not in result
+
+
+def test_logger_exception_scans_unicode_malformed_values(tmp_path: Path) -> None:
+    logger = configure_logging(tmp_path)
+    try:
+        raise RuntimeError(r'{"api\u005fkey":exception-unicode-secret}')
+    except RuntimeError:
+        logger.exception("unicode malformed value")
+    for handler in logger.handlers:
+        handler.flush()
+    content = (tmp_path / "xiangqi-agent.log").read_text(encoding="utf-8")
+    assert "exception-unicode-secret" not in content
+
+
 def test_logger_exception_redacts_malformed_fallbacks(tmp_path: Path) -> None:
     logger = configure_logging(tmp_path)
     try:
