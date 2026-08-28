@@ -29,6 +29,23 @@ def test_parse_fen_normalizes_extended_fields_to_board_and_side() -> None:
     assert board.ply == 0
 
 
+@pytest.mark.parametrize(
+    "extension",
+    (
+        "x - 0 1",
+        "- x 0 1",
+        "- - zero 1",
+        "- - -1 1",
+        "- - 0 zero",
+        "- - 0 0",
+        "- - 0 -1",
+    ),
+)
+def test_parse_fen_rejects_invalid_extension_fields(extension: str) -> None:
+    with pytest.raises(ValueError):
+        parse_fen(f"9/9/9/9/9/9/9/9/9/9 w {extension}")
+
+
 def test_board_state_and_move_are_immutable() -> None:
     board = parse_fen(START)
     move = Move(uci="a0a1", from_index=81, to_index=72)
@@ -46,6 +63,30 @@ def test_board_state_requires_exactly_ninety_valid_intersections_and_side() -> N
         BoardState(pieces=(".",) * 89 + ("x",), side_to_move="w")
     with pytest.raises(ValueError):
         BoardState(pieces=(".",) * 90, side_to_move="x")  # type: ignore[arg-type]
+    with pytest.raises(ValueError):
+        BoardState(pieces=([],) + (".",) * 89, side_to_move="w")  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("orientation", "ply"),
+    (
+        ("red_bottom", 0),
+        (Orientation.RED_BOTTOM, True),
+        (Orientation.RED_BOTTOM, "0"),
+        (Orientation.RED_BOTTOM, -1),
+    ),
+)
+def test_board_state_requires_orientation_and_non_negative_integer_ply(
+    orientation: Orientation | str,
+    ply: bool | int | str,
+) -> None:
+    with pytest.raises(ValueError):
+        BoardState(
+            pieces=(".",) * 90,
+            side_to_move="w",
+            orientation=orientation,  # type: ignore[arg-type]
+            ply=ply,  # type: ignore[arg-type]
+        )
 
 
 @pytest.mark.parametrize(

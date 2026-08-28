@@ -13,6 +13,8 @@ def parse_fen(text: str) -> BoardState:
     board_field, side = fields[:2]
     if side not in ("w", "b"):
         raise ValueError("side to move must be 'w' or 'b'")
+    if len(fields) == 6:
+        _validate_extension_fields(fields[2:])
 
     ranks = board_field.split("/")
     if len(ranks) != 10:
@@ -28,6 +30,16 @@ def parse_fen(text: str) -> BoardState:
 def to_fen(board: BoardState) -> str:
     ranks = (_serialize_rank(board.pieces[start : start + 9]) for start in range(0, 90, 9))
     return f"{'/'.join(ranks)} {board.side_to_move}"
+
+
+def _validate_extension_fields(fields: list[str]) -> None:
+    castling, en_passant, halfmove, fullmove = fields
+    if castling != "-" or en_passant != "-":
+        raise ValueError("Xiangqi FEN extension markers must be '-'")
+    if not halfmove.isascii() or not halfmove.isdecimal():
+        raise ValueError("FEN halfmove clock must be a non-negative integer")
+    if not fullmove.isascii() or not fullmove.isdecimal() or int(fullmove) < 1:
+        raise ValueError("FEN fullmove number must be a positive integer")
 
 
 def _parse_rank(rank: str) -> tuple[str, ...]:

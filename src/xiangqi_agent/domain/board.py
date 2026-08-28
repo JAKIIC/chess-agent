@@ -31,11 +31,15 @@ class BoardState:
         if (
             not isinstance(self.pieces, tuple)
             or len(self.pieces) != 90
-            or any(piece not in VALID_PIECES for piece in self.pieces)
+            or any(not isinstance(piece, str) or piece not in VALID_PIECES for piece in self.pieces)
         ):
             raise ValueError("board must contain exactly 90 valid intersections")
         if self.side_to_move not in ("w", "b"):
             raise ValueError("side to move must be 'w' or 'b'")
+        if not isinstance(self.orientation, Orientation):
+            raise ValueError("orientation must be an Orientation")  # noqa: TRY004
+        if isinstance(self.ply, bool) or not isinstance(self.ply, int) or self.ply < 0:
+            raise ValueError("ply must be a non-negative integer")
 
     @property
     def fen(self) -> str:
