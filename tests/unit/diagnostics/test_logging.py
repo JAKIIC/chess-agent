@@ -75,6 +75,13 @@ valid {"api_key":"[REDACTED]"}'''
     for secret in ("quoted-plain-token", "braced-plain-token", "truncated-plain-secret", "unquoted-plain-secret"):
         assert secret not in result
     assert 'valid {"api_key":"[REDACTED]"}' in result
+    assert 'Bearer "[REDACTED]"' == redact('Bearer "quoted-token"')
+    assert "Bearer {[REDACTED]}" == redact("Bearer {braced-token}")
+
+
+def test_redact_masks_secrets_after_redacted_marker_prefix() -> None:
+    for text in ('{"api_key":"[REDACTED]actual-secret', '{"api_key":[REDACTED]actual-secret'):
+        assert "actual-secret" not in redact(text)
 
 
 def test_logger_exception_redacts_malformed_fallbacks(tmp_path: Path) -> None:

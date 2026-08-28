@@ -10,8 +10,8 @@ from typing import Any
 
 _BEARER_QUOTED = re.compile(r'(\bBearer\s+)"[^"]*"', re.IGNORECASE)
 _BEARER_BRACED = re.compile(r'(\bBearer\s+)\{[^}]*\}', re.IGNORECASE)
-_BEARER_UNMATCHED_QUOTE = re.compile(r'(\bBearer\s+)"[^\r\n]*', re.IGNORECASE)
-_BEARER_UNMATCHED_BRACE = re.compile(r'(\bBearer\s+)\{[^\r\n]*', re.IGNORECASE)
+_BEARER_UNMATCHED_QUOTE = re.compile(r'(\bBearer\s+)"(?![^\r\n]*")[^\r\n]*', re.IGNORECASE)
+_BEARER_UNMATCHED_BRACE = re.compile(r'(\bBearer\s+)\{(?![^\r\n]*\})[^\r\n]*', re.IGNORECASE)
 _BEARER = re.compile(r'(\bBearer\s+)[^\s,;"\'{}\[\]]+', re.IGNORECASE)
 _SK_SECRET = re.compile(r"\bsk-[A-Za-z0-9][A-Za-z0-9._~+/=-]*")
 _JSON_API_KEY = re.compile(r'(?i)(["\']api_key["\']\s*:)')
@@ -32,13 +32,15 @@ def _redact_surface(text: str) -> str:
     result = _BEARER_UNMATCHED_QUOTE.sub(r'\1"[REDACTED]', result)
     result = _BEARER_UNMATCHED_BRACE.sub(r"\1{[REDACTED]", result)
     result = _BEARER.sub(r"\1[REDACTED]", result)
-    result = _API_KEY_FALLBACK.sub(
-        lambda match: match.group(0)
-        if "[REDACTED]" in match.group(2)[:20]
-        else match.group(1) + "[REDACTED]",
-        result,
-    )
+    result = _API_KEY_FALLBACK.sub(_mask_api_key_fallback, result)
     return _SK_SECRET.sub("[REDACTED]", result)
+
+
+def _mask_api_key_fallback(match: re.Match[str]) -> str:
+    value = match.group(2).strip()
+    if re.match(r'^"?\[REDACTED\]"?(?:\s*[,}\]]|\s*$)', value):
+        return match.group(0)
+    return match.group(1) + "[REDACTED]"
 
 
 def _sanitize_json(value: Any, depth: int = 0) -> Any:
