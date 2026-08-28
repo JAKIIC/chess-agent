@@ -65,6 +65,35 @@ def test_logger_redacts_non_sk_bearer_in_exception(tmp_path: Path) -> None:
     assert "exception-token" not in content
 
 
+def test_redact_masks_malformed_bearer_and_api_key_fallbacks() -> None:
+    text = '''Authorization: Bearer "quoted-plain-token"
+Authorization: Bearer {braced-plain-token}
+{"api_key": "truncated-plain-secret
+{"api_key":unquoted-plain-secret
+valid {"api_key":"[REDACTED]"}'''
+    result = redact(text)
+    for secret in ("quoted-plain-token", "braced-plain-token", "truncated-plain-secret", "unquoted-plain-secret"):
+        assert secret not in result
+    assert 'valid {"api_key":"[REDACTED]"}' in result
+
+
+def test_logger_exception_redacts_malformed_fallbacks(tmp_path: Path) -> None:
+    logger = configure_logging(tmp_path)
+    try:
+        raise RuntimeError(
+            'Authorization: Bearer "exception-quoted"\n'
+            'Authorization: Bearer {exception-braced}\n'
+            '{"api_key":exception-api-secret}'
+        )
+    except RuntimeError:
+        logger.exception("malformed security values")
+    for handler in logger.handlers:
+        handler.flush()
+    content = (tmp_path / "xiangqi-agent.log").read_text(encoding="utf-8")
+    for secret in ("exception-quoted", "exception-braced", "exception-api-secret"):
+        assert secret not in content
+
+
 def test_logger_redacts_double_encoded_json_in_direct_and_exception_messages(tmp_path: Path) -> None:
     logger = configure_logging(tmp_path)
     logger.error(r'"{\"api\u005fkey\":\"direct-double-encoded\"}"')

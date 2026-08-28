@@ -8,9 +8,14 @@ import re
 from pathlib import Path
 from typing import Any
 
+_BEARER_QUOTED = re.compile(r'(\bBearer\s+)"[^"]*"', re.IGNORECASE)
+_BEARER_BRACED = re.compile(r'(\bBearer\s+)\{[^}]*\}', re.IGNORECASE)
+_BEARER_UNMATCHED_QUOTE = re.compile(r'(\bBearer\s+)"[^\r\n]*', re.IGNORECASE)
+_BEARER_UNMATCHED_BRACE = re.compile(r'(\bBearer\s+)\{[^\r\n]*', re.IGNORECASE)
 _BEARER = re.compile(r'(\bBearer\s+)[^\s,;"\'{}\[\]]+', re.IGNORECASE)
 _SK_SECRET = re.compile(r"\bsk-[A-Za-z0-9][A-Za-z0-9._~+/=-]*")
 _JSON_API_KEY = re.compile(r'(?i)(["\']api_key["\']\s*:)')
+_API_KEY_FALLBACK = re.compile(r'(?i)(["\']?api_key["\']?\s*:\s*)([^\r\n]*)')
 _ESCAPED_JSON_STRING = re.compile(r'(?i)((?:\\)?["\']api_key(?:\\)?["\']\s*:\s*)((?:\\)?["\'])(.*?)(?:\\)?["\']')
 
 
@@ -22,7 +27,17 @@ def redact(text: str) -> str:
 
 
 def _redact_surface(text: str) -> str:
-    result = _BEARER.sub(r"\1[REDACTED]", text)
+    result = _BEARER_QUOTED.sub(r'\1"[REDACTED]"', text)
+    result = _BEARER_BRACED.sub(r"\1{[REDACTED]}", result)
+    result = _BEARER_UNMATCHED_QUOTE.sub(r'\1"[REDACTED]', result)
+    result = _BEARER_UNMATCHED_BRACE.sub(r"\1{[REDACTED]", result)
+    result = _BEARER.sub(r"\1[REDACTED]", result)
+    result = _API_KEY_FALLBACK.sub(
+        lambda match: match.group(0)
+        if "[REDACTED]" in match.group(2)[:20]
+        else match.group(1) + "[REDACTED]",
+        result,
+    )
     return _SK_SECRET.sub("[REDACTED]", result)
 
 
