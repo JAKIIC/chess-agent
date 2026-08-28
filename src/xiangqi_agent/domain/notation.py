@@ -53,11 +53,17 @@ def _disambiguator(board: BoardState, source_index: int, kind: str, side: Side) 
         return "前" if position == 0 else "后"
     if len(same_file) == 3:
         return ("前", "中", "后")[position]
-    return f"{'前' if position < len(same_file) / 2 else '后'}{_distance_numeral(position + 1, side)}"
+    front_count = len(same_file) // 2
+    if len(same_file) % 2 and position == front_count:
+        return "中"
+    if position < front_count:
+        return f"前{_distance_numeral(position + 1, side)}"
+    rear_position = position - front_count - (len(same_file) % 2)
+    return f"后{_distance_numeral(rear_position + 1, side)}"
 
 
 def _file_numeral(column: int, side: Side) -> str:
-    number = column + 1 if side == "w" else 9 - column
+    number = 9 - column if side == "w" else column + 1
     return (_RED_NUMERALS if side == "w" else _BLACK_NUMERALS)[number - 1]
 
 

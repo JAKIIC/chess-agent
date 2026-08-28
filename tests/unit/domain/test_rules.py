@@ -73,6 +73,28 @@ def test_legal_moves_reject_friendly_capture_and_other_side_pieces() -> None:
     assert black_to_move == {"e9d9", "e9f9"}
 
 
+def test_public_rule_entry_points_reject_a_board_without_exactly_one_general_per_side() -> None:
+    empty = parse_fen("9/9/9/9/9/9/9/9/9/9 w")
+    duplicate_red = parse_fen("4k4/9/9/9/9/9/9/9/9/3KK4 w")
+    duplicate_black = parse_fen("3kk4/9/9/9/9/9/9/9/9/4K4 w")
+    invalid_move = Move("a0a1", 81, 72)
+
+    for board in (empty, duplicate_red, duplicate_black):
+        with pytest.raises(ValueError, match="exactly one K and one k"):
+            legal_moves(board)
+        with pytest.raises(ValueError, match="exactly one K and one k"):
+            apply_move(board, invalid_move)
+        with pytest.raises(ValueError, match="exactly one K and one k"):
+            is_in_check(board, "w")
+        with pytest.raises(ValueError, match="exactly one K and one k"):
+            detect_unique_move(board, board)
+
+
+def test_legal_moves_never_offer_the_opposing_general_as_a_capture() -> None:
+    legal = moves("9/4k4/9/9/9/9/9/4R4/9/3K5 w")
+    assert "e2e8" not in legal
+
+
 def test_apply_move_updates_capture_turn_ply_and_preserves_orientation() -> None:
     board = parse_fen("4k4/9/9/9/4p4/4R4/9/9/9/4K4 w")
     board = board.__class__(
@@ -134,7 +156,7 @@ def test_detect_unique_capture_ignores_orientation_and_ply() -> None:
         "3k5/9/9/9/9/9/9/9/9/5K3 b",
     ),
 )
-def test_detect_unique_move_rejects_zero_or_multiple_frame_changes(after_fen: str) -> None:
+def test_detect_unique_move_rejects_zero_match_and_two_piece_frame_changes(after_fen: str) -> None:
     before = parse_fen("4k4/9/9/9/9/9/9/9/9/4K4 w")
     with pytest.raises(ValueError, match="unique legal move"):
         detect_unique_move(before, parse_fen(after_fen))

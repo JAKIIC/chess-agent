@@ -11,10 +11,12 @@ _ORTHOGONAL_DIRECTIONS = ((-1, 0), (0, -1), (0, 1), (1, 0))
 _HORSE_DELTAS = ((-2, -1), (-2, 1), (-1, -2), (-1, 2), (1, -2), (1, 2), (2, -1), (2, 1))
 _ELEPHANT_DELTAS = ((-2, -2), (-2, 2), (2, -2), (2, 2))
 _ADVISOR_DELTAS = ((-1, -1), (-1, 1), (1, -1), (1, 1))
+_GENERAL_COUNT_ERROR = "board must contain exactly one K and one k"
 
 
 def legal_moves(board: BoardState) -> tuple[Move, ...]:
     """Return all legal moves for the side to move in a stable order."""
+    _validate_generals(board)
     side = board.side_to_move
     legal = (
         move
@@ -26,6 +28,7 @@ def legal_moves(board: BoardState) -> tuple[Move, ...]:
 
 def apply_move(board: BoardState, move: Move) -> BoardState:
     """Apply one legal move while preserving display orientation and advancing the ply."""
+    _validate_generals(board)
     if not isinstance(move, Move) or move not in legal_moves(board):
         raise ValueError("move must be a legal move for the board")
     return _apply_unchecked(board, move)
@@ -33,6 +36,7 @@ def apply_move(board: BoardState, move: Move) -> BoardState:
 
 def is_in_check(board: BoardState, side: Side) -> bool:
     """Return whether *side*'s general is attacked in the supplied position."""
+    _validate_generals(board)
     if side not in ("w", "b"):
         raise ValueError("side must be 'w' or 'b'")
 
@@ -53,6 +57,8 @@ def detect_unique_move(before: BoardState, after: BoardState) -> Move:
     Observation metadata (orientation and ply) is intentionally excluded because a frame
     comparison represents only the pieces and the player to move.
     """
+    _validate_generals(before)
+    _validate_generals(after)
     matches = tuple(
         move
         for move in legal_moves(before)
@@ -279,11 +285,14 @@ def _same_frame(left: BoardState, right: BoardState) -> bool:
 
 
 def _find_general(board: BoardState, side: Side) -> int:
+    _validate_generals(board)
     general = "K" if side == "w" else "k"
-    try:
-        return board.pieces.index(general)
-    except ValueError as error:
-        raise ValueError(f"board does not contain the {side} general") from error
+    return board.pieces.index(general)
+
+
+def _validate_generals(board: BoardState) -> None:
+    if board.pieces.count("K") != 1 or board.pieces.count("k") != 1:
+        raise ValueError(_GENERAL_COUNT_ERROR)
 
 
 def _generals_face(board: BoardState) -> bool:
