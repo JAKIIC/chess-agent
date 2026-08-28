@@ -43,6 +43,15 @@ def test_validation_rejects_invalid_values(tmp_path: Path) -> None:
         AppSettings.model_validate({"capture_fps": 0})
     with pytest.raises(ValueError):
         AppSettings.model_validate({"diagnostic_retention_days": -1})
+    for payload in (
+        {"capture_fps": "5"},
+        {"save_diagnostic_images": 1},
+        {"save_diagnostic_images": "false"},
+    ):
+        path = tmp_path / "invalid.json"
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        with pytest.raises(ValueError, match="settings"):
+            AppSettings.load(path)
 
 
 def test_unknown_fields_are_rejected(tmp_path: Path) -> None:
@@ -54,6 +63,8 @@ def test_unknown_fields_are_rejected(tmp_path: Path) -> None:
 
 def test_save_uses_atomic_replace_and_cleans_failed_temp(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     settings = AppSettings.default(tmp_path)
+    target = tmp_path / "settings.json"
+    target.write_text('{"capture_fps": 99}\n', encoding="utf-8")
     real_replace = __import__("os").replace
 
     def fail_replace(source: str, destination: str) -> None:
@@ -63,6 +74,7 @@ def test_save_uses_atomic_replace_and_cleans_failed_temp(monkeypatch: pytest.Mon
     with pytest.raises(OSError):
         settings.save()
     assert list(tmp_path.glob(".settings-*.tmp")) == []
+    assert target.read_text(encoding="utf-8") == '{"capture_fps": 99}\n'
     monkeypatch.setattr("xiangqi_agent.config.os.replace", real_replace)
 
 

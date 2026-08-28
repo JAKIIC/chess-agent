@@ -13,7 +13,7 @@ USERNAME = "deepseek-api-key"
 
 
 class AppSettings(BaseModel):
-    model_config = ConfigDict(extra="forbid", validate_assignment=True)
+    model_config = ConfigDict(extra="forbid", strict=True, validate_assignment=True)
 
     capture_fps: int = Field(default=5, gt=0)
     animation_fps: int = Field(default=10, gt=0)
