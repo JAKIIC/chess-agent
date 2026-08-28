@@ -8,7 +8,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-_BEARER = re.compile(r"(\bBearer\s+)[^\s,;]+", re.IGNORECASE)
+_BEARER = re.compile(r'(\bBearer\s+)[^\s,;"\'{}\[\]]+', re.IGNORECASE)
 _SK_SECRET = re.compile(r"\bsk-[A-Za-z0-9][A-Za-z0-9._~+/=-]*")
 _JSON_API_KEY = re.compile(r'(?i)(["\']api_key["\']\s*:)')
 _ESCAPED_JSON_STRING = re.compile(r'(?i)((?:\\)?["\']api_key(?:\\)?["\']\s*:\s*)((?:\\)?["\'])(.*?)(?:\\)?["\']')
@@ -18,7 +18,11 @@ def redact(text: str) -> str:
     """Replace credential values while preserving surrounding message structure."""
     result = _redact_json_fragments(text)
     result = _ESCAPED_JSON_STRING.sub(r"\1\2[REDACTED]\2", result)
-    result = _BEARER.sub(r"\1[REDACTED]", result)
+    return _redact_surface(result)
+
+
+def _redact_surface(text: str) -> str:
+    result = _BEARER.sub(r"\1[REDACTED]", text)
     return _SK_SECRET.sub("[REDACTED]", result)
 
 
@@ -33,7 +37,7 @@ def _sanitize_json(value: Any, depth: int = 0) -> Any:
     if isinstance(value, list):
         return [_sanitize_json(item, depth + 1) for item in value]
     if isinstance(value, str):
-        return _redact_json_fragments(value, depth + 1)
+        return _redact_surface(_redact_json_fragments(value, depth + 1))
     return value
 
 
