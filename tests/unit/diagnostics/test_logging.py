@@ -1,3 +1,4 @@
+import io
 import json
 import logging
 from pathlib import Path
@@ -106,6 +107,33 @@ def test_logger_exception_scans_unicode_malformed_values(tmp_path: Path) -> None
         handler.flush()
     content = (tmp_path / "xiangqi-agent.log").read_text(encoding="utf-8")
     assert "exception-unicode-secret" not in content
+
+
+def test_external_handler_cannot_leak_after_shutdown_and_reconfigure(tmp_path: Path) -> None:
+    first = configure_logging(tmp_path)
+    stream = io.StringIO()
+    external = logging.StreamHandler(stream)
+    first.addHandler(external)
+    shutdown_logging(tmp_path)
+    logger = configure_logging(tmp_path)
+    logger.error("Authorization: Bearer external-secret {\"api_key\":\"api-secret\"}")
+    try:
+        raise RuntimeError("Bearer " + "exception-" + "secret {\"api_key\":\"exception-" + "api" + "\"}")
+    except RuntimeError:
+        logger.exception("failure")
+    assert "external-secret" not in stream.getvalue()
+    assert "api-secret" not in stream.getvalue()
+    assert "exception-secret" not in stream.getvalue()
+    assert "exception-api" not in stream.getvalue()
+    logger.removeHandler(external)
+    external.close()
+
+
+def test_repeated_configuration_does_not_duplicate_logger_filters(tmp_path: Path) -> None:
+    logger = configure_logging(tmp_path)
+    filters = list(logger.filters)
+    configure_logging(tmp_path)
+    assert logger.filters == filters
 
 
 def test_redact_scans_unicode_escaped_bearer_word() -> None:

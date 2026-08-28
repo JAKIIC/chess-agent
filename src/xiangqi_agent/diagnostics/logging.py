@@ -148,7 +148,17 @@ class _RedactionFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
         record.msg = redact(record.getMessage())
         record.args = ()
+        if record.exc_info is not None:
+            exc_type, exc_value, traceback = record.exc_info
+            if exc_type is not None and exc_value is not None:
+                safe = _RedactedException(redact(str(exc_value))).with_traceback(traceback)
+                record.exc_info = (exc_type, safe, traceback)
+            record.exc_text = None
         return True
+
+
+class _RedactedException(Exception):
+    """Exception wrapper retaining the original traceback without its message."""
 
 
 class _RedactingFormatter(logging.Formatter):
@@ -168,6 +178,8 @@ def configure_logging(log_dir: Path) -> logging.Logger:
     logger = logging.getLogger(f"xiangqi_agent.diagnostics.{target_dir}")
     logger.setLevel(logging.INFO)
     logger.propagate = False
+    if not any(isinstance(item, _RedactionFilter) for item in logger.filters):
+        logger.addFilter(_RedactionFilter())
     handler = logging.handlers.RotatingFileHandler(
         target_dir / "xiangqi-agent.log", maxBytes=1_048_576, backupCount=3, encoding="utf-8"
     )
