@@ -8,7 +8,7 @@ from xiangqi_agent.config import AppSettings, SecretStore
 
 def test_settings_have_safe_defaults(tmp_path: Path) -> None:
     settings = AppSettings.default(tmp_path)
-    assert settings.capture_fps == 5
+    assert settings.capture_fps == 2
     assert settings.animation_fps == 10
     assert settings.stable_frames == 3
     assert settings.stable_window_ms == 600
@@ -23,10 +23,10 @@ def test_settings_have_safe_defaults(tmp_path: Path) -> None:
 def test_load_missing_file_and_round_trip_non_sensitive_settings(tmp_path: Path) -> None:
     path = tmp_path / "settings.json"
     settings = AppSettings.load(path)
-    assert settings.capture_fps == 5
+    assert settings.capture_fps == 2
     settings.save()
     data = json.loads(path.read_text(encoding="utf-8"))
-    assert data["capture_fps"] == 5
+    assert data["capture_fps"] == 2
     assert "api_key" not in json.dumps(data).lower()
     assert AppSettings.load(path).deepseek_model == "deepseek-v4-flash"
 

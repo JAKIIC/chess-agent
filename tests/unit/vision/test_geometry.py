@@ -1,0 +1,89 @@
+import cv2
+import numpy as np
+import pytest
+
+from xiangqi_agent.domain.board import Orientation
+from xiangqi_agent.vision.geometry import (
+    BoardGeometry,
+    GeometryError,
+    NormalizedQuad,
+    parse_normalized_quad,
+)
+
+
+def test_parse_normalized_quad_accepts_cli_order_and_rejects_bad_input() -> None:
+    quad = parse_normalized_quad("0.1,0.1;0.9,0.1;0.9,0.9;0.1,0.9")
+    assert quad.points == ((0.1, 0.1), (0.9, 0.1), (0.9, 0.9), (0.1, 0.9))
+    with pytest.raises(GeometryError, match="four x,y"):
+        parse_normalized_quad("0.1,0.1;0.9,0.1")
+
+
+def test_normalized_quad_from_pixels_produces_stable_ninety_point_order() -> None:
+    quad = NormalizedQuad.from_pixels(
+        ((100, 100), (900, 100), (900, 900), (100, 900)),
+        frame_size=(1001, 1001),
+    )
+    geometry = BoardGeometry.from_quad(quad, frame_size=(1001, 1001))
+
+    points = geometry.grid_points()
+
+    assert len(points) == 90
+    assert points[0] == pytest.approx((100.0, 100.0))
+    assert points[8] == pytest.approx((900.0, 100.0))
+    assert points[81] == pytest.approx((100.0, 900.0))
+    assert points[89] == pytest.approx((900.0, 900.0))
+
+
+def test_black_bottom_orientation_maps_internal_first_point_to_screen_bottom_right() -> None:
+    quad = NormalizedQuad(((0.1, 0.1), (0.9, 0.1), (0.9, 0.9), (0.1, 0.9)))
+    geometry = BoardGeometry.from_quad(
+        quad,
+        frame_size=(1001, 1001),
+        orientation=Orientation.BLACK_BOTTOM,
+    )
+
+    assert geometry.grid_points()[0] == pytest.approx((900.0, 900.0))
+    assert geometry.grid_points()[89] == pytest.approx((100.0, 100.0))
+
+
+def test_crop_intersections_returns_owned_ordered_patches_and_rejects_resize() -> None:
+    width, height, patch_size = 73, 81, 8
+    frame = np.zeros((height, width, 4), dtype=np.uint8)
+    frame[..., 3] = 255
+    pixel_quad = ((4, 4), (68, 4), (68, 76), (4, 76))
+    for index, (x, y) in enumerate(
+        BoardGeometry.from_quad(
+            NormalizedQuad.from_pixels(pixel_quad, (width, height)),
+            (width, height),
+        ).grid_points()
+    ):
+        cv2.circle(frame, (round(x), round(y)), 2, (index + 1, 0, 0, 255), thickness=-1)
+    geometry = BoardGeometry.from_quad(
+        NormalizedQuad.from_pixels(pixel_quad, (width, height)),
+        (width, height),
+    )
+
+    patches = geometry.crop_intersections(frame, size=patch_size)
+
+    assert len(patches) == 90
+    assert all(patch.shape == (patch_size, patch_size, 4) for patch in patches)
+    assert all(patch.flags["OWNDATA"] for patch in patches)
+    assert int(patches[0][patch_size // 2, patch_size // 2, 0]) == 1
+    assert int(patches[89][patch_size // 2, patch_size // 2, 0]) == 90
+    with pytest.raises(GeometryError, match="size changed"):
+        geometry.crop_intersections(np.zeros((height + 1, width, 4), dtype=np.uint8), size=8)
+
+
+@pytest.mark.parametrize(
+    "points",
+    (
+        ((0.1, 0.1), (0.9, 0.1), (0.1, 0.9), (0.9, 0.9)),
+        ((-0.1, 0.1), (0.9, 0.1), (0.9, 0.9), (0.1, 0.9)),
+        ((0.1, 0.1), (0.2, 0.1), (0.2, 0.11), (0.1, 0.11)),
+    ),
+)
+def test_normalized_quad_rejects_bow_tie_out_of_bounds_and_tiny_shapes(
+    points: tuple[tuple[float, float], ...],
+) -> None:
+    with pytest.raises(GeometryError):
+        NormalizedQuad(points)

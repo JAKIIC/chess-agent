@@ -15,7 +15,7 @@ USERNAME = "deepseek-api-key"
 class AppSettings(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, validate_assignment=True)
 
-    capture_fps: int = Field(default=5, gt=0)
+    capture_fps: int = Field(default=2, gt=0)
     animation_fps: int = Field(default=10, gt=0)
     stable_frames: int = Field(default=3, gt=0)
     stable_window_ms: int = Field(default=600, gt=0)
