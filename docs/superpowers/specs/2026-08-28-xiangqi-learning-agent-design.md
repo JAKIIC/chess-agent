@@ -60,7 +60,9 @@ MoveEvent / BoardState
 ## 5. 技术基线
 
 - Python `>=3.12,<3.13`；开发机使用已安装的 Python 3.12.4。
-- PySide6 `>=6.8,<7`：独立桌面窗口、线程信号、镜像棋盘和设置界面。
+- PySide6 `>=6.8,<6.10`：独立桌面窗口、线程信号、镜像棋盘和设置界面。
+
+  兼容性说明：在锁定的 Python 3.12.4 Anaconda Windows 环境中，PySide6 6.10.3/6.11.2 的 QtCore 会通过新增的通用 ICU 依赖加载 `icuuc.dll`，并因 WinError 127 失败；PySide6 6.9.3 已验证可正常加载。项目保留 Qt 运行时导入测试，只有更新版本 wheel 通过该测试后才重新评估此上限。
 - `windows-capture==2.0.1`：通过 Windows Graphics Capture 捕获指定窗口。
 - OpenCV `>=4.10,<5`、NumPy `>=2,<3`：棋盘裁切、图像归一化和变化检测。
 - ONNX Runtime `>=1.20,<2`：本地棋子分类推理，默认 CPU Execution Provider。
