@@ -8,7 +8,9 @@ import re
 from pathlib import Path
 from typing import Any
 
-_BEARER_WORD = re.compile(r"\bBearer\b", re.IGNORECASE)
+_BEARER_WORD = re.compile(
+    r"(?i)(?:b|\\u0042)(?:e|\\u0065)(?:a|\\u0061)(?:r|\\u0072)(?:e|\\u0065)(?:r|\\u0072)"
+)
 _SK_SECRET = re.compile(r"\bsk-[A-Za-z0-9][A-Za-z0-9._~+/=-]*")
 _API_KEY_CHAR = r"(?:a|\\u0061)(?:p|\\u0070)(?:i|\\u0069)(?:_|\\u005f)(?:k|\\u006b)(?:e|\\u0065)(?:y|\\u0079)"
 _API_KEY_FALLBACK = re.compile(
@@ -90,11 +92,6 @@ def _redact_bearer_values(text: str) -> str:
 
 def _mask_api_key_fallback(match: re.Match[str]) -> str:
     value = match.group(2).strip()
-    if value.startswith(('"', "'")) and len(value) > 1:
-        quote = value[0]
-        closing = value.find(quote, 1)
-        if closing > 0:
-            return match.group(1) + quote + "[REDACTED]" + value[closing:]
     if re.match(r'^"?\[REDACTED\]"?(?:\s*[,}\]]|\s*$)', value):
         return match.group(0)
     return match.group(1) + "[REDACTED]"

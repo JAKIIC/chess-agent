@@ -108,6 +108,26 @@ def test_logger_exception_scans_unicode_malformed_values(tmp_path: Path) -> None
     assert "exception-unicode-secret" not in content
 
 
+def test_redact_scans_unicode_escaped_bearer_word() -> None:
+    text = r'Authorization: \u0042\u0065\u0061\u0072\u0065\u0072\u0020unicode-word-secret'
+    assert "unicode-word-secret" not in redact(text)
+
+
+def test_logger_exception_scans_unicode_escaped_bearer_word(tmp_path: Path) -> None:
+    logger = configure_logging(tmp_path)
+    try:
+        raise RuntimeError(r'Authorization: \u0042\u0065\u0061\u0072\u0065\u0072\u0020exception-unicode-word')
+    except RuntimeError:
+        logger.exception("escaped bearer")
+    for handler in logger.handlers:
+        handler.flush()
+    assert "exception-unicode-word" not in (tmp_path / "xiangqi-agent.log").read_text(encoding="utf-8")
+
+
+def test_redact_masks_malformed_quoted_api_key_suffix() -> None:
+    assert "quoted-secret-suffix" not in redact('{"api_key":"[REDACTED]quoted-secret-suffix')
+
+
 def test_logger_exception_redacts_malformed_fallbacks(tmp_path: Path) -> None:
     logger = configure_logging(tmp_path)
     try:
