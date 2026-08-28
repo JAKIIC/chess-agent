@@ -34,6 +34,31 @@ def test_redact_decodes_unicode_escaped_json_keys_and_bearer_values() -> None:
         assert secret not in result
 
 
+def test_redact_decodes_top_level_and_embedded_json_string_literals() -> None:
+    messages = (
+        r'"{\"api\u005fkey\":\"encoded-secret\"}"',
+        r'payload "{\"\u0061pi_key\":\"encoded-prefix-secret\"}"',
+        r'"{\"Authorization\":\"Bearer\u0020sk-escaped-bearer\"}"',
+    )
+    for message in messages:
+        result = redact(message)
+        assert all(secret not in result for secret in ("encoded-secret", "encoded-prefix-secret", "sk-escaped-bearer"))
+
+
+def test_logger_redacts_double_encoded_json_in_direct_and_exception_messages(tmp_path: Path) -> None:
+    logger = configure_logging(tmp_path)
+    logger.error(r'"{\"api\u005fkey\":\"direct-double-encoded\"}"')
+    try:
+        raise RuntimeError(r'"{\"Authorization\":\"Bearer\u0020sk-exception-double\"}"')
+    except RuntimeError:
+        logger.exception("double-encoded failure")
+    for handler in logger.handlers:
+        handler.flush()
+    content = (tmp_path / "xiangqi-agent.log").read_text(encoding="utf-8")
+    assert "direct-double-encoded" not in content
+    assert "sk-exception-double" not in content
+
+
 def test_logger_redacts_arguments_and_direct_messages(tmp_path: Path) -> None:
     logger = configure_logging(tmp_path)
     logger.warning("Authorization: Bearer %s", "sk-argument")

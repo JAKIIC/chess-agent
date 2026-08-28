@@ -45,7 +45,7 @@ def _redact_json_fragments(text: str, depth: int = 0) -> str:
     cursor = 0
     index = 0
     while index < len(text):
-        if text[index] not in "[{":
+        if text[index] not in "[{\"":
             index += 1
             continue
         try:
@@ -53,10 +53,18 @@ def _redact_json_fragments(text: str, depth: int = 0) -> str:
         except json.JSONDecodeError:
             index += 1
             continue
-        result.append(text[cursor:index])
-        result.append(json.dumps(_sanitize_json(value, depth), ensure_ascii=False, separators=(",", ":")))
-        cursor = index + consumed
-        index = cursor
+        sanitized = _sanitize_json(value, depth)
+        serialized = json.dumps(sanitized, ensure_ascii=False, separators=(",", ":"))
+        should_replace = sanitized != value or (
+            isinstance(value, str) and value.lstrip().startswith(("{", "["))
+        )
+        if should_replace:
+            result.append(text[cursor:index])
+            result.append(serialized)
+            cursor = index + consumed
+            index = cursor
+        else:
+            index += 1
     result.append(text[cursor:])
     return "".join(result)
 
