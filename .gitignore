@@ -1,0 +1,54 @@
+# Python environments and caches
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+*.egg-info/
+
+# Build and packaging output
+build/
+dist/
+*.spec.bak
+
+# Superpowers and isolated worktrees
+.worktrees/
+.superpowers/
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+
+# Runtime and private user data
+.local/
+data/
+runtime/
+captures/
+diagnostics/
+*.db
+*.sqlite
+*.sqlite3
+*.log
+
+# Downloaded engines and model assets
+engines/
+models/
+*.exe
+*.dll
+*.pdb
+*.onnx
+*.nnue
+
+# Editors and operating systems
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
