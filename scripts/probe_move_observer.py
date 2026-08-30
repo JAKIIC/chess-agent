@@ -14,6 +14,7 @@ from xiangqi_agent.domain.board import BoardState, Orientation
 from xiangqi_agent.domain.fen import parse_fen
 from xiangqi_agent.domain.notation import to_chinese
 from xiangqi_agent.platform.windows import WindowsWindowCatalog, select_window
+from xiangqi_agent.sync.evidence import MoveProposal
 from xiangqi_agent.sync.move_observer import LegalMoveDiffObserver
 from xiangqi_agent.sync.tracker import StableMoveTracker, TrackingStatus
 from xiangqi_agent.vision.change_detection import FrameStabilityDetector
@@ -98,38 +99,7 @@ def main() -> int:
                         "confirmed_position_id": update.board.position_id,
                     }
                     if observation is not None:
-                        result["confidence"] = round(observation.confidence, 4)
-                        result["top_candidates"] = [
-                            {
-                                "uci": candidate.move.uci,
-                                "score": round(candidate.score, 4),
-                                "source_difference": round(candidate.source_difference, 4),
-                                "destination_difference": round(
-                                    candidate.destination_difference,
-                                    4,
-                                ),
-                                "unexpected_difference": round(
-                                    candidate.unexpected_difference,
-                                    4,
-                                ),
-                                "semantic_distance": round(
-                                    max(
-                                        candidate.source_expected_distance,
-                                        candidate.destination_expected_distance,
-                                    ),
-                                    4,
-                                ),
-                                "semantic_margin": round(candidate.semantic_margin, 4),
-                                "semantic_confidence": round(
-                                    min(
-                                        candidate.source_semantic_confidence,
-                                        candidate.destination_semantic_confidence,
-                                    ),
-                                    4,
-                                ),
-                            }
-                            for candidate in observation.candidates[:5]
-                        ]
+                        result.update(_proposal_details(observation))
                     if update.move is not None:
                         result["uci"] = update.move.uci
                         result["chinese"] = to_chinese(board, update.move)
@@ -241,9 +211,9 @@ def _next_adaptive_samples(
                 try:
                     event = events.get_nowait()
                 except Empty:
-                    samples = sampler.on_clock(now_ns)
-                    if samples:
-                        return samples
+                    clock_samples = sampler.on_clock(now_ns)
+                    if clock_samples:
+                        return clock_samples
                     continue
             else:
                 try:
@@ -262,15 +232,47 @@ def _next_adaptive_samples(
         )
         if close_error is not None:
             raise close_error
-        samples: list[CaptureFrame] = []
+        emitted_samples: list[CaptureFrame] = []
         for frame in (item for item in batch if isinstance(item, CaptureFrame)):
-            samples.extend(sampler.on_frame(frame))
-        if samples:
-            return tuple(samples)
+            emitted_samples.extend(sampler.on_frame(frame))
+        if emitted_samples:
+            return tuple(emitted_samples)
 
 
 def _parse_board(fen: str, orientation: Orientation) -> BoardState:
     return replace(parse_fen(fen), orientation=orientation)
+
+
+def _proposal_details(proposal: MoveProposal) -> dict[str, object]:
+    return {
+        "evidence_score": round(proposal.evidence_score, 4),
+        "rejection_reasons": list(proposal.evidence.rejection_reasons),
+        "top_candidates": [
+            {
+                "uci": candidate.move.uci,
+                "score": round(candidate.score, 4),
+                "source_difference": round(candidate.source_difference, 4),
+                "destination_difference": round(candidate.destination_difference, 4),
+                "unexpected_difference": round(candidate.unexpected_difference, 4),
+                "semantic_distance": round(
+                    max(
+                        candidate.source_expected_distance,
+                        candidate.destination_expected_distance,
+                    ),
+                    4,
+                ),
+                "semantic_margin": round(candidate.semantic_margin, 4),
+                "semantic_evidence_score": round(
+                    min(
+                        candidate.source_semantic_evidence_score,
+                        candidate.destination_semantic_evidence_score,
+                    ),
+                    4,
+                ),
+            }
+            for candidate in proposal.evidence.candidates[:5]
+        ],
+    }
 
 
 def _parse_args() -> argparse.Namespace:

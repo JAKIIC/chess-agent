@@ -50,9 +50,9 @@ def test_observer_accepts_the_unique_legal_origin_and_destination_pair() -> None
 
     assert result.status is ObservationStatus.ACCEPTED
     assert result.move == move
-    assert result.after == after_board
-    assert result.confidence > 0.9
-    assert result.candidates[0].move.uci == "h2e2"
+    assert not hasattr(result, "after")
+    assert result.evidence_score > 0.9
+    assert result.evidence.candidates[0].move.uci == "h2e2"
 
 
 def test_observer_does_not_accept_only_one_changed_intersection() -> None:
@@ -71,7 +71,7 @@ def test_observer_does_not_accept_only_one_changed_intersection() -> None:
 
     assert result.status is ObservationStatus.AMBIGUOUS
     assert result.move is None
-    assert result.after is None
+    assert result.evidence.rejection_reasons
 
 
 def test_observer_rejects_two_highlighted_intersections_when_no_piece_moved() -> None:
@@ -92,15 +92,15 @@ def test_observer_rejects_two_highlighted_intersections_when_no_piece_moved() ->
 
     assert result.status is ObservationStatus.AMBIGUOUS
     assert result.move is None
-    assert result.after is None
+    assert result.evidence.rejection_reasons
 
 
-def test_observer_honors_a_stricter_configured_minimum_confidence() -> None:
+def test_observer_honors_a_stricter_configured_minimum_evidence_score() -> None:
     board = parse_fen(START)
     move = _move(board, "h2e2")
     after = _render(apply_move(board, move))
 
-    result = LegalMoveDiffObserver(patch_size=CELL, min_confidence=0.999).observe(
+    result = LegalMoveDiffObserver(patch_size=CELL, min_evidence_score=0.999).observe(
         board,
         _render(board),
         after,
@@ -109,7 +109,7 @@ def test_observer_honors_a_stricter_configured_minimum_confidence() -> None:
 
     assert result.status is ObservationStatus.AMBIGUOUS
     assert result.move is None
-    assert result.after is None
+    assert "evidence_score" in result.evidence.rejection_reasons
 
 
 def test_observer_keeps_the_default_semantic_margin_above_one_sample() -> None:
@@ -132,11 +132,12 @@ def test_observer_keeps_the_default_semantic_margin_above_one_sample() -> None:
         _geometry(),
     )
 
-    assert result.candidates[0].semantic_margin == pytest.approx(5 / 255, abs=1e-6)
-    assert result.candidates[0].destination_semantic_confidence > 0.8
+    candidate = result.evidence.candidates[0]
+    assert candidate.semantic_margin == pytest.approx(5 / 255, abs=1e-6)
+    assert candidate.destination_semantic_evidence_score > 0.8
     assert result.status is ObservationStatus.AMBIGUOUS
     assert result.move is None
-    assert result.after is None
+    assert "semantic_margin" in result.evidence.rejection_reasons
 
 
 def test_observer_accepts_same_side_piece_appearance_variation_at_destination() -> None:
@@ -159,7 +160,7 @@ def test_observer_accepts_same_side_piece_appearance_variation_at_destination() 
 
     assert result.status is ObservationStatus.ACCEPTED
     assert result.move == move
-    assert result.after == apply_move(board, move)
+    assert not hasattr(result, "after")
 
 
 def test_observer_rejects_opposite_side_appearance_at_destination() -> None:
@@ -184,10 +185,10 @@ def test_observer_rejects_opposite_side_appearance_at_destination() -> None:
 
     assert result.status is ObservationStatus.AMBIGUOUS
     assert result.move is None
-    assert result.after is None
+    assert result.evidence.rejection_reasons
 
 
-def test_observer_applies_the_configured_confidence_boundary() -> None:
+def test_observer_applies_the_configured_evidence_score_boundary() -> None:
     board = parse_fen(START)
     move = _move(board, "h2e2")
     before = _render(board)
@@ -203,16 +204,16 @@ def test_observer_applies_the_configured_confidence_boundary() -> None:
     accepted = LegalMoveDiffObserver(
         patch_size=CELL,
         min_semantic_margin=0.01,
-        min_confidence=0.8,
+        min_evidence_score=0.8,
     ).observe(board, before, after, _geometry())
     rejected = LegalMoveDiffObserver(
         patch_size=CELL,
         min_semantic_margin=0.01,
-        min_confidence=0.82,
+        min_evidence_score=0.82,
     ).observe(board, before, after, _geometry())
 
     assert accepted.status is ObservationStatus.ACCEPTED
-    assert 0.8 < accepted.confidence < 0.82
+    assert 0.8 < accepted.evidence_score < 0.82
     assert rejected.status is ObservationStatus.AMBIGUOUS
 
 
@@ -230,7 +231,7 @@ def test_observer_pauses_when_two_legal_moves_appear_between_frames() -> None:
 
     assert result.status is ObservationStatus.AMBIGUOUS
     assert result.move is None
-    assert result.after is None
+    assert result.evidence.rejection_reasons
 
 
 def test_observer_reports_no_change_without_inventing_a_move() -> None:
@@ -241,7 +242,7 @@ def test_observer_reports_no_change_without_inventing_a_move() -> None:
 
     assert result.status is ObservationStatus.NO_CHANGE
     assert result.move is None
-    assert result.after is None
+    assert result.evidence.candidates == ()
 
 
 @pytest.mark.parametrize("threshold", [0.0, float("nan"), float("inf")])

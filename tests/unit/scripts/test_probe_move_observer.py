@@ -9,7 +9,13 @@ import pytest
 import scripts.probe_move_observer as probe
 from xiangqi_agent.capture.adaptive_sampling import AdaptiveBurstSampler
 from xiangqi_agent.capture.protocol import CaptureClosedError, CaptureFrame
-from xiangqi_agent.domain.board import Orientation
+from xiangqi_agent.domain.board import Move, Orientation
+from xiangqi_agent.sync.evidence import (
+    CandidateEvidence,
+    MoveEvidence,
+    MoveProposal,
+    ObservationStatus,
+)
 
 
 def _frame(timestamp_ns: int = 1, *, shape: tuple[int, int] = (2, 2)) -> CaptureFrame:
@@ -229,3 +235,31 @@ def test_probe_defaults_to_high_rate_capture_with_two_fps_steady_logic(
     assert args.fps == 2
     assert args.capture_fps == 20
     assert args.settle_ms == 100
+
+
+def test_probe_serializes_evidence_without_probability_like_confidence_names() -> None:
+    candidate = CandidateEvidence(
+        move=Move("i0h0", 89, 88),
+        source_difference=14.0,
+        destination_difference=27.0,
+        unexpected_difference=1.0,
+        source_expected_distance=0.1,
+        destination_expected_distance=0.12,
+        semantic_margin=0.03,
+        source_semantic_evidence_score=0.9,
+        destination_semantic_evidence_score=0.8,
+        score=13.0,
+    )
+    proposal = MoveProposal(
+        status=ObservationStatus.AMBIGUOUS,
+        move=None,
+        evidence_score=0.8,
+        evidence=MoveEvidence((candidate,), (0.0,) * 90, ("candidate_margin",)),
+    )
+
+    payload = probe._proposal_details(proposal)
+
+    assert payload["evidence_score"] == 0.8
+    assert payload["rejection_reasons"] == ["candidate_margin"]
+    assert payload["top_candidates"][0]["semantic_evidence_score"] == 0.8
+    assert "confidence" not in str(payload)

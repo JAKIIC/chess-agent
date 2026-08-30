@@ -3,11 +3,8 @@ import numpy as np
 from xiangqi_agent.domain.board import BoardState
 from xiangqi_agent.domain.fen import parse_fen
 from xiangqi_agent.domain.rules import apply_move, legal_moves
-from xiangqi_agent.sync.move_observer import (
-    LegalMoveDiffObserver,
-    MoveObservation,
-    ObservationStatus,
-)
+from xiangqi_agent.sync.evidence import MoveEvidence, MoveProposal, ObservationStatus
+from xiangqi_agent.sync.move_observer import LegalMoveDiffObserver
 from xiangqi_agent.sync.tracker import StableMoveTracker, TrackingStatus
 from xiangqi_agent.vision.geometry import BoardGeometry, NormalizedQuad
 
@@ -106,25 +103,24 @@ def test_tracker_returns_to_watching_when_transient_change_restores_baseline() -
     assert restored.move is None
 
 
-def test_tracker_rejects_an_observer_supplied_board_that_does_not_match_the_move() -> None:
+def test_tracker_rejects_an_observer_supplied_illegal_move_without_changing_board() -> None:
     board = parse_fen(START)
     move = _move(board, "h2e2")
+    illegal_after_first_commit = _move(apply_move(board, move), "h7e7")
 
-    class MismatchedObserver:
-        def observe(self, *_args: object) -> MoveObservation:
-            return MoveObservation(
-                ObservationStatus.ACCEPTED,
-                move,
-                board,
-                1.0,
-                (),
-                (),
+    class IllegalObserver:
+        def observe(self, *_args: object) -> MoveProposal:
+            return MoveProposal(
+                status=ObservationStatus.ACCEPTED,
+                move=illegal_after_first_commit,
+                evidence_score=1.0,
+                evidence=MoveEvidence((), (), ()),
             )
 
     tracker = StableMoveTracker(
         board,
         _geometry(),
-        MismatchedObserver(),
+        IllegalObserver(),
         required_stable_pairs=1,
         patch_size=CELL,
     )

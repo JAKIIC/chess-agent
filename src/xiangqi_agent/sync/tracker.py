@@ -7,8 +7,9 @@ import numpy as np
 from numpy.typing import NDArray
 
 from xiangqi_agent.domain.board import BoardState, Move
-from xiangqi_agent.domain.rules import apply_move
-from xiangqi_agent.sync.move_observer import MoveObservation, MoveObserver, ObservationStatus
+from xiangqi_agent.sync.committer import RuleStateCommitter, StateCommitter
+from xiangqi_agent.sync.evidence import MoveProposal, ObservationStatus
+from xiangqi_agent.sync.move_observer import MoveObserver
 from xiangqi_agent.vision.change_detection import analyze_frame_change
 from xiangqi_agent.vision.geometry import BoardGeometry
 
@@ -25,7 +26,7 @@ class TrackingUpdate:
     status: TrackingStatus
     board: BoardState
     move: Move | None = None
-    observation: MoveObservation | None = None
+    observation: MoveProposal | None = None
 
 
 class StableMoveTracker:
@@ -36,6 +37,7 @@ class StableMoveTracker:
         board: BoardState,
         geometry: BoardGeometry,
         observer: MoveObserver,
+        committer: StateCommitter | None = None,
         *,
         required_stable_pairs: int = 2,
         global_threshold: float = 1.5,
@@ -47,6 +49,7 @@ class StableMoveTracker:
         self._board = board
         self._geometry = geometry
         self._observer = observer
+        self._committer = committer or RuleStateCommitter()
         self._required_stable_pairs = required_stable_pairs
         self._global_threshold = global_threshold
         self._local_threshold = local_threshold
@@ -105,13 +108,11 @@ class StableMoveTracker:
             self._geometry,
         )
         if observation.status is ObservationStatus.ACCEPTED:
-            if observation.move is None or observation.after is None:
+            if observation.move is None:
                 return self._pause(observation)
             try:
-                verified_after = apply_move(self._board, observation.move)
+                verified_after = self._committer.commit(self._board, observation.move)
             except ValueError:
-                return self._pause(observation)
-            if observation.after != verified_after:
                 return self._pause(observation)
             self._board = verified_after
             self._confirmed_frame = current.copy()
@@ -131,7 +132,7 @@ class StableMoveTracker:
 
         return self._pause(observation)
 
-    def _pause(self, observation: MoveObservation) -> TrackingUpdate:
+    def _pause(self, observation: MoveProposal) -> TrackingUpdate:
         self._paused = True
         return TrackingUpdate(
             TrackingStatus.PAUSED_AMBIGUOUS,
