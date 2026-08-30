@@ -5,8 +5,8 @@
 **分支：** `develop`
 
 **结论：** 本地解释闭环已通过真实 Pikafish 窗口冒烟；DeepSeek 客户端已按当前官方
-Chat Completions 契约实现并通过模拟 HTTP 集成测试。由于尚未配置真实 API Key，真实
-DeepSeek 网络调用明确保持未验收。
+Chat Completions 契约实现，既通过模拟 HTTP 集成测试，也已使用保存在 Windows
+Credential Manager 的用户 Key 完成一次真实受约束调用。
 
 ## 1. 教练证据边界
 
@@ -44,6 +44,10 @@ DeepSeek 网络调用明确保持未验收。
 4. UCI 走法白名单扫描；
 5. 中文具体走法白名单扫描。
 
+推荐着仍只能从 candidate 白名单中选择；解释后续变化时可以引用已经由规则层逐步复演
+的 PV 着法。真实冒烟发现并修复了“已验证 PV 被误当成越界走法”的过度拒绝问题，任意
+不在候选或 PV 中的走法仍会被拒绝。
+
 首次结构或白名单失败只重试一次；再次失败、空内容、超时、HTTP 错误或余额错误均回退
 到确定性的本地证据模板。错误响应和 API Key 不写日志。
 
@@ -57,26 +61,39 @@ DeepSeek 网络调用明确保持未验收。
 - 中文走法引用通过枚举当前合法走法精确解析；零个或多个匹配都不猜。
 - 新 FEN 会清除旧证据和旧回答；异步服务不显示过期 `position_id` 的结果。
 
-## 4. 真实本地闭环冒烟
+## 4. 真实闭环冒烟
 
 使用已安装的真实 Pikafish 对当前已知局面完成加深分析，再在无 API Key 模式提问。
 教练页成功显示四级提示、当前首选中文记谱、引擎深度/评分、变化线下一手和训练问题；
 窗口关闭后无引擎残留。调试截图只位于 Git 忽略的 `.local/`。
 
+随后把用户提供的 Key 通过隐藏输入写入 Windows Credential Manager，并只以布尔值
+确认配置状态。真实 DeepSeek 请求经历“Pikafish 三候选 → CoachEvidence → 云端 JSON →
+本地白名单扫描”，最终结果满足：
+
+- `source=deepseek`
+- 返回 `position_id` 与当前局面一致
+- 主候选在 `allowed_move_map` 中
+- alternatives 全部属于白名单
+- 置信度为 0.7
+- 请求结束后 Pikafish 正常退出
+
+完整 Key、Authorization 头和完整请求均未输出或写入项目文件。
+
 ## 5. 自动验证
 
 | 检查 | 结果 |
 |---|---|
-| Coach 单元/HTTP 集成测试 | 15 passed |
+| Coach 单元/HTTP 集成测试 | 16 passed |
 | UI、设置、走法引用新增测试 | 6 passed |
-| 全量 pytest | 268 passed |
+| 全量 pytest | 269 passed |
 | Ruff | All checks passed |
 | mypy | 54 source files, no issues |
 | `git diff --check` | 通过 |
 
 ## 6. 尚未验收
 
-- 尚未使用用户真实 API Key 调用 DeepSeek，因此不宣称真实网络、账户余额或服务质量通过。
+- 仅完成一次真实 API 功能冒烟，尚未进行持续负载、限流或长时间服务质量测试。
 - 用户提到非前三候选走法时能够精确识别，但尚未启动新的 Pikafish 分支分析来量化损失。
 - 视觉严格门仍缺真实端点样本；教练只服务于手工确认或规则层确认的局面。
 - 捕获状态、手工四角标定和同步警告尚未并入主窗口。

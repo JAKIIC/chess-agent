@@ -15,6 +15,7 @@ START = "rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w"
 
 def _evidence() -> CoachEvidence:
     board = parse_fen(START)
+    candidate_moves = (("h2e2", "h9g7"), ("b0c2",), ("g3g4",))
     lines = tuple(
         EngineLine(
             position_id=board.position_id,
@@ -26,10 +27,10 @@ def _evidence() -> CoachEvidence:
             nodes=10_000,
             nps=100_000,
             time_ms=500,
-            pv=(uci,),
+            pv=pv,
         )
-        for index, (uci, score) in enumerate(
-            (("h2e2", 35), ("b0c2", 25), ("g3g4", 15)), start=1
+        for index, (pv, score) in enumerate(
+            zip(candidate_moves, (35, 25, 15), strict=True), start=1
         )
     )
     analysis = EngineAnalysis(
@@ -128,6 +129,34 @@ def test_unlisted_concrete_move_in_text_is_rejected() -> None:
     result = client.explain(_evidence(), "为什么？")
 
     assert result.source == "local_fallback"
+
+
+def test_verified_principal_variation_move_may_be_explained_but_not_recommended() -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "content": _content(
+                                why="candidate_1 后的已验证变化包含马8进7。"
+                            )
+                        }
+                    }
+                ]
+            },
+        )
+
+    client = DeepSeekClient(
+        api_key="test-secret",
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+    result = client.explain(_evidence(), "变化线说明了什么？")
+
+    assert result.source == "deepseek"
+    assert result.candidate_id == "candidate_1"
 
 
 def test_http_payment_error_falls_back_without_exposing_response() -> None:

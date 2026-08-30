@@ -143,9 +143,15 @@ def _validate_grounding(evidence: CoachEvidence, explanation: CoachExplanation) 
     )
     if any(reference not in allowed_ids for reference in _CANDIDATE_REFERENCE.findall(text)):
         raise CoachResponseError("explanation text references an unlisted candidate")
-    allowed_uci = {candidate.uci for candidate in evidence.candidates}
+    allowed_uci = {
+        uci for candidate in evidence.candidates for uci in candidate.pv_uci
+    }
     if any(reference not in allowed_uci for reference in _UCI_REFERENCE.findall(text)):
         raise CoachResponseError("explanation contains a move outside the candidate whitelist")
-    allowed_notation = set(evidence.allowed_move_map.values())
+    allowed_notation = {
+        notation
+        for candidate in evidence.candidates
+        for notation in candidate.pv_notation
+    }
     if any(reference not in allowed_notation for reference in _CHINESE_MOVE.findall(text)):
         raise CoachResponseError("explanation contains unverified Chinese move notation")
