@@ -31,7 +31,7 @@ dist/
 data/
 runtime/
 captures/
-diagnostics/
+/diagnostics/
 *.db
 *.sqlite
 *.sqlite3
