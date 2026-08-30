@@ -7,6 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from xiangqi_agent.domain.board import Side
 
 type GamePhase = Literal["opening", "middlegame", "endgame"]
+type ExplanationSource = Literal["deepseek", "local_fallback"]
 
 
 class CoachCandidate(BaseModel):
@@ -53,3 +54,18 @@ class CoachEvidence(BaseModel):
     candidates: tuple[CoachCandidate, ...] = Field(min_length=1, max_length=3)
     allowed_move_map: dict[str, str]
     actual_move_review: str | None = None
+
+
+class CoachExplanation(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    position_id: str = Field(min_length=1)
+    position_summary: str = Field(min_length=1)
+    main_plan: str = Field(min_length=1)
+    candidate_id: str = Field(pattern=r"^candidate_[1-9][0-9]*$")
+    why: str = Field(min_length=1)
+    opponent_threat: str = Field(min_length=1)
+    alternatives: tuple[str, ...]
+    training_question: str = Field(min_length=1)
+    confidence: float = Field(ge=0, le=1)
+    source: ExplanationSource
