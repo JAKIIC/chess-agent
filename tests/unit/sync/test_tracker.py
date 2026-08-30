@@ -81,7 +81,7 @@ def test_tracker_keeps_last_confirmed_board_when_change_is_ambiguous() -> None:
     assert paused.status is TrackingStatus.PAUSED_AMBIGUOUS
     assert paused.board == board
     assert paused.move is None
-    assert still_paused.status is TrackingStatus.PAUSED_AMBIGUOUS
+    assert still_paused.status is TrackingStatus.MANUAL_RECOVERY_REQUIRED
     assert still_paused.board == board
 
 
@@ -133,3 +133,53 @@ def test_tracker_rejects_an_observer_supplied_illegal_move_without_changing_boar
     assert result.status is TrackingStatus.PAUSED_AMBIGUOUS
     assert result.board == board
     assert result.move is None
+
+
+def test_tracker_context_invalidation_blocks_frames_until_explicit_recovery() -> None:
+    board = parse_fen(START)
+    tracker = _tracker(board)
+    frame = _render(board)
+    tracker.initialize(frame)
+
+    invalidated = tracker.invalidate_context()
+    blocked = tracker.push(frame.copy())
+
+    assert invalidated.status is TrackingStatus.CONTEXT_INVALID
+    assert blocked.status is TrackingStatus.CONTEXT_INVALID
+    assert blocked.board == board
+
+
+def test_tracker_desynchronization_requires_manual_recovery() -> None:
+    board = parse_fen(START)
+    tracker = _tracker(board)
+    frame = _render(board)
+    tracker.initialize(frame)
+
+    desynchronized = tracker.mark_desynchronized()
+    blocked = tracker.push(frame.copy())
+
+    assert desynchronized.status is TrackingStatus.DESYNCHRONIZED
+    assert blocked.status is TrackingStatus.MANUAL_RECOVERY_REQUIRED
+    assert blocked.board == board
+
+
+def test_manual_recovery_replaces_board_and_confirmed_frame() -> None:
+    board = parse_fen(START)
+    move = _move(board, "h2e2")
+    recovered_board = apply_move(board, move)
+    recovered_frame = _render(recovered_board)
+    tracker = _tracker(board)
+    tracker.initialize(_render(board))
+    tracker.mark_desynchronized()
+
+    update = tracker.recover(recovered_board, recovered_frame)
+    accepted_move = _move(recovered_board, "h7e7")
+    after_recovery = apply_move(recovered_board, accepted_move)
+    tracker.push(_render(after_recovery))
+    tracker.push(_render(after_recovery))
+    accepted = tracker.push(_render(after_recovery))
+
+    assert update.status is TrackingStatus.WATCHING
+    assert update.board == recovered_board
+    assert tracker.board == after_recovery
+    assert accepted.status is TrackingStatus.ACCEPTED

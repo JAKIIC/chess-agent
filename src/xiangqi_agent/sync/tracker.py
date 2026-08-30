@@ -19,6 +19,9 @@ class TrackingStatus(StrEnum):
     WAITING_FOR_STABLE = "waiting_for_stable"
     ACCEPTED = "accepted"
     PAUSED_AMBIGUOUS = "paused_ambiguous"
+    CONTEXT_INVALID = "context_invalid"
+    DESYNCHRONIZED = "desynchronized"
+    MANUAL_RECOVERY_REQUIRED = "manual_recovery_required"
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,7 +61,7 @@ class StableMoveTracker:
         self._previous_frame: NDArray[np.uint8] | None = None
         self._motion_seen = False
         self._stable_pairs = 0
-        self._paused = False
+        self._blocked_status: TrackingStatus | None = None
 
     @property
     def board(self) -> BoardState:
@@ -70,14 +73,20 @@ class StableMoveTracker:
         self._previous_frame = current
         self._motion_seen = False
         self._stable_pairs = 0
-        self._paused = False
+        self._blocked_status = None
         return TrackingUpdate(TrackingStatus.WATCHING, self._board)
 
     def push(self, frame: NDArray[np.generic]) -> TrackingUpdate:
         if self._confirmed_frame is None or self._previous_frame is None:
             raise RuntimeError("tracker must be initialized with a confirmed frame")
-        if self._paused:
-            return TrackingUpdate(TrackingStatus.PAUSED_AMBIGUOUS, self._board)
+        if self._blocked_status is not None:
+            if self._blocked_status in (
+                TrackingStatus.PAUSED_AMBIGUOUS,
+                TrackingStatus.DESYNCHRONIZED,
+                TrackingStatus.MANUAL_RECOVERY_REQUIRED,
+            ):
+                self._blocked_status = TrackingStatus.MANUAL_RECOVERY_REQUIRED
+            return TrackingUpdate(self._blocked_status, self._board)
 
         current = _owned_frame(frame)
         change = analyze_frame_change(
@@ -133,12 +142,36 @@ class StableMoveTracker:
         return self._pause(observation)
 
     def _pause(self, observation: MoveProposal) -> TrackingUpdate:
-        self._paused = True
+        self._blocked_status = TrackingStatus.PAUSED_AMBIGUOUS
         return TrackingUpdate(
             TrackingStatus.PAUSED_AMBIGUOUS,
             self._board,
             observation=observation,
         )
+
+    def invalidate_context(self) -> TrackingUpdate:
+        self._blocked_status = TrackingStatus.CONTEXT_INVALID
+        return TrackingUpdate(TrackingStatus.CONTEXT_INVALID, self._board)
+
+    def mark_desynchronized(self) -> TrackingUpdate:
+        self._blocked_status = TrackingStatus.DESYNCHRONIZED
+        return TrackingUpdate(TrackingStatus.DESYNCHRONIZED, self._board)
+
+    def recover(
+        self,
+        board: BoardState,
+        frame: NDArray[np.generic],
+    ) -> TrackingUpdate:
+        if not isinstance(board, BoardState):
+            raise TypeError("recovery board must be a BoardState")
+        current = _owned_frame(frame)
+        self._board = board
+        self._confirmed_frame = current.copy()
+        self._previous_frame = current
+        self._motion_seen = False
+        self._stable_pairs = 0
+        self._blocked_status = None
+        return TrackingUpdate(TrackingStatus.WATCHING, self._board)
 
 
 def _owned_frame(frame: NDArray[np.generic]) -> NDArray[np.uint8]:
