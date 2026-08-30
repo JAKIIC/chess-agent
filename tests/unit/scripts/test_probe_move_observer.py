@@ -1,3 +1,4 @@
+import sys
 from argparse import Namespace
 from queue import Queue
 from time import monotonic
@@ -6,12 +7,13 @@ import numpy as np
 import pytest
 
 import scripts.probe_move_observer as probe
+from xiangqi_agent.capture.adaptive_sampling import AdaptiveBurstSampler
 from xiangqi_agent.capture.protocol import CaptureClosedError, CaptureFrame
 from xiangqi_agent.domain.board import Orientation
 
 
-def _frame(timestamp_ns: int = 1) -> CaptureFrame:
-    return CaptureFrame(timestamp_ns, 1, np.zeros((2, 2, 4), dtype=np.uint8))
+def _frame(timestamp_ns: int = 1, *, shape: tuple[int, int] = (2, 2)) -> CaptureFrame:
+    return CaptureFrame(timestamp_ns, 1, np.zeros((*shape, 4), dtype=np.uint8))
 
 
 def test_quiet_capture_reuses_the_latest_frame_as_a_stability_tick() -> None:
@@ -102,3 +104,128 @@ def test_black_bottom_orientation_is_shared_by_board_and_geometry() -> None:
 
     assert geometry.orientation is Orientation.BLACK_BOTTOM
     assert board.orientation is geometry.orientation
+
+
+def test_adaptive_event_preserves_a_quiet_endpoint_before_the_next_callback() -> None:
+    sampler = AdaptiveBurstSampler(steady_fps=2, settle_ms=100, stable_repeats=2)
+    changed = _frame(50_000_000)
+    sampler.initialize(_frame(0))
+    sampler.on_frame(changed)
+    events: Queue[CaptureFrame | CaptureClosedError] = Queue()
+    next_change = _frame(170_000_000)
+    events.put(next_change)
+
+    samples = probe._next_adaptive_samples(
+        events,
+        sampler,
+        deadline_ns=1_000_000_000,
+        clock_ns=lambda: 60_000_000,
+    )
+
+    assert samples == (changed, changed, changed, next_change)
+
+
+def test_adaptive_quiet_deadline_promotes_the_buffered_steady_callback() -> None:
+    sampler = AdaptiveBurstSampler(steady_fps=2, settle_ms=100, stable_repeats=2)
+    changed = _frame(50_000_000)
+    sampler.initialize(_frame(0))
+    sampler.on_frame(changed)
+
+    samples = probe._next_adaptive_samples(
+        Queue(),
+        sampler,
+        deadline_ns=200_000_000,
+        clock_ns=lambda: 150_000_000,
+    )
+
+    assert samples == (changed, changed, changed)
+
+
+def test_adaptive_event_prioritizes_a_queued_close_over_buffered_endpoint() -> None:
+    sampler = AdaptiveBurstSampler(steady_fps=2, settle_ms=100, stable_repeats=2)
+    changed = _frame(50_000_000)
+    sampler.initialize(_frame(0))
+    sampler.on_frame(changed)
+    events: Queue[CaptureFrame | CaptureClosedError] = Queue()
+    events.put(_frame(170_000_000))
+    events.put(CaptureClosedError("closed after endpoint"))
+
+    with pytest.raises(CaptureClosedError, match="closed after endpoint"):
+        probe._next_adaptive_samples(
+            events,
+            sampler,
+            deadline_ns=1_000_000_000,
+            clock_ns=lambda: 60_000_000,
+        )
+
+
+def test_adaptive_event_rejects_a_queued_resize_before_buffered_endpoint() -> None:
+    sampler = AdaptiveBurstSampler(steady_fps=2, settle_ms=100, stable_repeats=2)
+    changed = _frame(50_000_000)
+    sampler.initialize(_frame(0))
+    sampler.on_frame(changed)
+    events: Queue[CaptureFrame | CaptureClosedError] = Queue()
+    events.put(_frame(170_000_000))
+    events.put(_frame(180_000_000, shape=(3, 2)))
+
+    with pytest.raises(ValueError, match="size changed"):
+        probe._next_adaptive_samples(
+            events,
+            sampler,
+            deadline_ns=1_000_000_000,
+            clock_ns=lambda: 60_000_000,
+        )
+
+
+def test_adaptive_clock_prioritizes_an_already_queued_close_at_settle_due() -> None:
+    sampler = AdaptiveBurstSampler(steady_fps=2, settle_ms=100, stable_repeats=2)
+    sampler.initialize(_frame(0))
+    sampler.on_frame(_frame(50_000_000))
+    events: Queue[CaptureFrame | CaptureClosedError] = Queue()
+    events.put(CaptureClosedError("closed at settle due"))
+
+    with pytest.raises(CaptureClosedError, match="closed at settle due"):
+        probe._next_adaptive_samples(
+            events,
+            sampler,
+            deadline_ns=200_000_000,
+            clock_ns=lambda: 150_000_000,
+        )
+
+
+def test_adaptive_clock_rejects_an_already_queued_resize_at_settle_due() -> None:
+    sampler = AdaptiveBurstSampler(steady_fps=2, settle_ms=100, stable_repeats=2)
+    sampler.initialize(_frame(0))
+    sampler.on_frame(_frame(50_000_000))
+    events: Queue[CaptureFrame | CaptureClosedError] = Queue()
+    events.put(_frame(60_000_000, shape=(3, 2)))
+
+    with pytest.raises(ValueError, match="size changed"):
+        probe._next_adaptive_samples(
+            events,
+            sampler,
+            deadline_ns=200_000_000,
+            clock_ns=lambda: 150_000_000,
+        )
+
+
+def test_probe_defaults_to_high_rate_capture_with_two_fps_steady_logic(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "probe_move_observer.py",
+            "--hwnd",
+            "1",
+            "--quad",
+            "0.1,0.1;0.9,0.1;0.9,0.9;0.1,0.9",
+        ],
+    )
+
+    args = probe._parse_args()
+
+    assert args.fps == 2
+    assert args.capture_fps == 20
+    assert args.settle_ms == 100
