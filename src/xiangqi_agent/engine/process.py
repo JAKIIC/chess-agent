@@ -5,7 +5,7 @@ import subprocess
 from dataclasses import replace
 from pathlib import Path
 from queue import Empty, Queue
-from threading import RLock, Thread
+from threading import Lock, RLock, Thread
 from time import monotonic
 
 from xiangqi_agent.domain.analysis import EngineAnalysis, EngineLine
@@ -54,6 +54,8 @@ class PikafishProcess:
         self._reader: Thread | None = None
         self._lines: Queue[str | None] = Queue()
         self._lock = RLock()
+        self._analysis_lock = Lock()
+        self._stdin_lock = Lock()
         self._engine_name = "unknown"
 
     @property
@@ -115,7 +117,7 @@ class PikafishProcess:
             raise ValueError("movetime_ms must be a positive integer")
         if isinstance(multipv, bool) or not isinstance(multipv, int) or multipv <= 0:
             raise ValueError("multipv must be a positive integer")
-        with self._lock:
+        with self._analysis_lock:
             self._require_running()
             self._drain_stale_lines()
             self._send(f"setoption name MultiPV value {multipv}")
@@ -199,14 +201,15 @@ class PikafishProcess:
             self._lines.put(None)
 
     def _send(self, command: str) -> None:
-        process = self._require_running()
-        if process.stdin is None:
-            raise EngineCrashedError("engine stdin is unavailable")
-        try:
-            process.stdin.write(command + "\n")
-            process.stdin.flush()
-        except (BrokenPipeError, OSError) as exc:
-            raise EngineCrashedError("engine exited while receiving a command") from exc
+        with self._stdin_lock:
+            process = self._require_running()
+            if process.stdin is None:
+                raise EngineCrashedError("engine stdin is unavailable")
+            try:
+                process.stdin.write(command + "\n")
+                process.stdin.flush()
+            except (BrokenPipeError, OSError) as exc:
+                raise EngineCrashedError("engine exited while receiving a command") from exc
 
     def _wait_for(self, expected: str, timeout: float, *, capture_identity: bool = False) -> None:
         deadline = monotonic() + timeout

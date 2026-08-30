@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from threading import Thread
+from time import monotonic, sleep
 
 import pytest
 
 from xiangqi_agent.domain.fen import parse_fen
 from xiangqi_agent.engine.process import (
     EngineCrashedError,
+    EngineProcessError,
     EngineTimeoutError,
     PikafishProcess,
 )
@@ -82,3 +85,28 @@ def test_engine_analysis_timeout_sends_stop_and_can_be_closed() -> None:
 
     engine.close()
     assert not engine.is_running
+
+
+def test_stop_can_interrupt_an_analysis_from_another_thread() -> None:
+    engine = _engine("interruptible")
+    engine.start()
+    failures: list[BaseException] = []
+
+    def analyse() -> None:
+        try:
+            engine.analyse(parse_fen(START), movetime_ms=1000, multipv=1, timeout=1.0)
+        except EngineProcessError as exc:  # the stopped search has no analysis line
+            failures.append(exc)
+
+    worker = Thread(target=analyse)
+    worker.start()
+    sleep(0.05)
+    started = monotonic()
+    engine.stop()
+    worker.join(timeout=0.3)
+    elapsed = monotonic() - started
+    engine.close()
+
+    assert not worker.is_alive()
+    assert elapsed < 0.3
+    assert failures
