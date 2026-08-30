@@ -38,6 +38,7 @@ from xiangqi_agent.engine.process import PikafishProcess
 from xiangqi_agent.engine.service import AnalysisEngine, AnalysisService
 from xiangqi_agent.ui.analysis_view_model import analysis_rows
 from xiangqi_agent.ui.board_widget import BoardWidget
+from xiangqi_agent.ui.capture_panel import CapturePanel
 from xiangqi_agent.ui.coach_panel import CoachPanel
 from xiangqi_agent.ui.fonts import ensure_cjk_font
 from xiangqi_agent.ui.settings_dialog import DeepSeekSettingsDialog
@@ -59,6 +60,7 @@ class MainWindow(QMainWindow):
         *,
         engine: AnalysisEngine | None = None,
         coach_client: CoachExplainer | None = None,
+        capture_panel: CapturePanel | None = None,
         runtime_root: Path | None = None,
         quick_ms: int = 500,
         deep_ms: int = 3000,
@@ -82,6 +84,7 @@ class MainWindow(QMainWindow):
         self._service: AnalysisService | None = None
 
         self.board_widget = BoardWidget()
+        self.capture_panel = capture_panel or CapturePanel()
         self.fen_input = QLineEdit(START_FEN)
         self.fen_input.setPlaceholderText("输入标准中国象棋 FEN")
         self.analyse_button = QPushButton("载入局面并分析")
@@ -149,6 +152,8 @@ class MainWindow(QMainWindow):
         separator = QFrame()
         separator.setFrameShape(QFrame.Shape.HLine)
         right.addWidget(separator)
+        right.addWidget(QLabel("可见窗口捕获与四角标定"))
+        right.addWidget(self.capture_panel)
         right.addWidget(QLabel("当前局面 FEN"))
         right.addWidget(self.fen_input)
         right.addWidget(self.analyse_button)
@@ -298,6 +303,7 @@ class MainWindow(QMainWindow):
         self.results.resizeColumnToContents(4)
 
     def closeEvent(self, event: QCloseEvent) -> None:
+        self.capture_panel.close_capture()
         self._coach_service.close()
         if self._service is not None:
             self._service.close()

@@ -18,6 +18,7 @@ class WindowInfo:
     title: str
     process_name: str
     client_size: tuple[int, int]
+    is_minimized: bool = False
 
 
 def filter_target_windows(windows: tuple[WindowInfo, ...]) -> tuple[WindowInfo, ...]:
@@ -26,6 +27,7 @@ def filter_target_windows(windows: tuple[WindowInfo, ...]) -> tuple[WindowInfo, 
         item
         for item in windows
         if item.hwnd > 0
+        and not item.is_minimized
         and bool(item.title.strip())
         and item.client_size[0] > 0
         and item.client_size[1] > 0
@@ -76,6 +78,7 @@ def _enumerate_top_level_windows() -> tuple[WindowInfo, ...]:
                 title=title_buffer.value,
                 process_name=_process_name(hwnd),
                 client_size=(width, height),
+                is_minimized=bool(user32.IsIconic(hwnd)),
             )
         )
         return True

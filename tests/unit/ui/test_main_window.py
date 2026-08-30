@@ -2,11 +2,17 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import numpy as np
+import pytest
 from PySide6.QtCore import Qt
 
+from xiangqi_agent.capture.fake import FakeFrameSource
+from xiangqi_agent.capture.protocol import CaptureClosedError
 from xiangqi_agent.coach.client import DeepSeekClient
 from xiangqi_agent.domain.analysis import EngineAnalysis, EngineLine
 from xiangqi_agent.domain.board import BoardState
+from xiangqi_agent.platform.windows import WindowInfo
+from xiangqi_agent.ui.capture_panel import CapturePanel
 from xiangqi_agent.ui.main_window import MainWindow
 
 START = "rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w"
@@ -56,6 +62,14 @@ class ImmediateEngine:
 
     def close(self) -> None:
         self.closed = True
+
+
+class OneWindowCatalog:
+    def __init__(self, window: WindowInfo) -> None:
+        self.window = window
+
+    def list_candidates(self) -> tuple[WindowInfo, ...]:
+        return (self.window,)
 
 
 def test_main_window_loads_fen_and_replaces_quick_with_deep_result(qtbot: object) -> None:
@@ -124,3 +138,26 @@ def test_missing_local_engine_shows_install_guidance_without_crashing(
     assert window.board_widget.board.fen == START
 
     window.close()
+
+
+def test_main_window_closes_connected_capture_panel(qtbot: object) -> None:
+    target = WindowInfo(42, "天天象棋", "WeChatAppEx.exe", (300, 200))
+    source = FakeFrameSource(target.hwnd)
+    capture_panel = CapturePanel(
+        catalog=OneWindowCatalog(target),
+        source_factory=lambda _: source,
+    )
+    window = MainWindow(
+        engine=ImmediateEngine(),
+        coach_client=DeepSeekClient(api_key=None),
+        capture_panel=capture_panel,
+    )
+    qtbot.addWidget(window)  # type: ignore[attr-defined]
+    capture_panel.refresh_button.click()
+    capture_panel.connect_button.click()
+    source.push(np.zeros((200, 300, 4), dtype=np.uint8), timestamp_ns=1)
+
+    window.close()
+
+    with pytest.raises(CaptureClosedError, match="closed"):
+        source.push(np.zeros((200, 300, 4), dtype=np.uint8), timestamp_ns=2)

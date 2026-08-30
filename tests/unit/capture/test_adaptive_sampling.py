@@ -67,6 +67,19 @@ def test_quiet_clock_promotes_one_buffered_steady_callback_as_a_stable_endpoint(
     assert sampler.on_clock(150_000_000) == (changed, changed, changed)
 
 
+def test_significant_visual_change_is_emitted_before_the_steady_clock() -> None:
+    sampler = AdaptiveBurstSampler(
+        steady_fps=2,
+        settle_ms=100,
+        stable_repeats=2,
+    )
+    baseline = _frame(0)
+    changed = _frame(50_000_000, 40)
+    sampler.initialize(baseline)
+
+    assert sampler.on_frame(changed) == (changed,)
+
+
 def test_steady_clock_keeps_the_two_fps_logic_without_duplicate_early_ticks() -> None:
     sampler = AdaptiveBurstSampler(
         steady_fps=2,

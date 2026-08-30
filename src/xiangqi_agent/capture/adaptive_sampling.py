@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import numpy as np
+
 from xiangqi_agent.capture.protocol import CaptureFrame
 
 _NANOSECONDS_PER_SECOND = 1_000_000_000
 _NANOSECONDS_PER_MILLISECOND = 1_000_000
+_VISUAL_TRIGGER_THRESHOLD = 12
+_VISUAL_TRIGGER_STRIDE = 8
 
 
 class AdaptiveBurstSampler:
@@ -26,6 +30,7 @@ class AdaptiveBurstSampler:
         self._bursting = False
         self._settled_latest = False
         self._latest_emitted = False
+        self._last_emitted: CaptureFrame | None = None
 
     @property
     def bursting(self) -> bool:
@@ -37,6 +42,7 @@ class AdaptiveBurstSampler:
         self._bursting = False
         self._settled_latest = False
         self._latest_emitted = True
+        self._last_emitted = frame
 
     def set_bursting(self, active: bool) -> None:
         if active == self._bursting:
@@ -63,10 +69,13 @@ class AdaptiveBurstSampler:
             samples += (frame,)
         elif quiet_gap and not self._latest_emitted:
             samples = (latest,) * (self._stable_repeats + 1) + (frame,)
+        elif self._visual_change_exceeds_trigger(frame):
+            samples = (frame,)
 
         self._latest = frame
         if samples:
             self._next_steady_due_ns = frame.timestamp_ns + self._steady_interval_ns
+            self._last_emitted = samples[-1]
         self._settled_latest = False
         self._latest_emitted = bool(samples)
         return samples
@@ -83,6 +92,7 @@ class AdaptiveBurstSampler:
             ):
                 self._settled_latest = True
                 self._latest_emitted = True
+                self._last_emitted = latest
                 return (latest,) * self._stable_repeats
             return ()
 
@@ -90,14 +100,25 @@ class AdaptiveBurstSampler:
             self._settled_latest = True
             self._latest_emitted = True
             self._next_steady_due_ns = timestamp_ns + self._steady_interval_ns
+            self._last_emitted = latest
             return (latest,) * (self._stable_repeats + 1)
 
         due = self._next_steady_due_ns
         if due is not None and timestamp_ns >= due:
             self._next_steady_due_ns = timestamp_ns + self._steady_interval_ns
             self._latest_emitted = True
+            self._last_emitted = latest
             return (latest,)
         return ()
+
+    def _visual_change_exceeds_trigger(self, frame: CaptureFrame) -> bool:
+        reference = self._last_emitted
+        if reference is None:
+            return False
+        before = reference.bgra[::_VISUAL_TRIGGER_STRIDE, ::_VISUAL_TRIGGER_STRIDE, :3]
+        after = frame.bgra[::_VISUAL_TRIGGER_STRIDE, ::_VISUAL_TRIGGER_STRIDE, :3]
+        difference = np.abs(before.astype(np.int16) - after.astype(np.int16))
+        return bool(difference.max(initial=0) >= _VISUAL_TRIGGER_THRESHOLD)
 
     def next_due_ns(self) -> int | None:
         latest = self._require_latest()
