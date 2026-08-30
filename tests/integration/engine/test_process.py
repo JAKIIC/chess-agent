@@ -110,3 +110,26 @@ def test_stop_can_interrupt_an_analysis_from_another_thread() -> None:
     assert not worker.is_alive()
     assert elapsed < 0.3
     assert failures
+
+
+def test_eval_file_in_unicode_workspace_is_loaded_from_engine_working_directory(
+    tmp_path: Path,
+) -> None:
+    eval_file = tmp_path / "象棋模型" / "pikafish.nnue"
+    eval_file.parent.mkdir()
+    eval_file.write_bytes(b"test network")
+    engine = PikafishProcess(
+        Path(sys.executable),
+        arguments=(str(FIXTURE.resolve()), "require_local_eval"),
+        eval_file=eval_file,
+        startup_timeout=2.0,
+        shutdown_timeout=1.0,
+    )
+
+    engine.start()
+    try:
+        analysis = engine.analyse(parse_fen(START), movetime_ms=50, multipv=1)
+    finally:
+        engine.close()
+
+    assert analysis.bestmove == "h2e2"

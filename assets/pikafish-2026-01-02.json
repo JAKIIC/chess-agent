@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "project": "official-pikafish/Pikafish",
+  "tag": "Pikafish-2026-01-02",
+  "commit": "ce0679e00ee196f7ba17f6ec18941b9a5036f8cf",
+  "asset_name": "Pikafish.2026-01-02.7z",
+  "url": "https://github.com/official-pikafish/Pikafish/releases/download/Pikafish-2026-01-02/Pikafish.2026-01-02.7z",
+  "size": 55332846,
+  "sha256": "84257063905615919fb4ee6a70273a94843bb6ec04c45e3ac706098838bc1a49",
+  "release_url": "https://github.com/official-pikafish/Pikafish/releases/tag/Pikafish-2026-01-02",
+  "source_url": "https://github.com/official-pikafish/Pikafish/tree/ce0679e00ee196f7ba17f6ec18941b9a5036f8cf",
+  "license_url": "https://github.com/official-pikafish/Pikafish/blob/ce0679e00ee196f7ba17f6ec18941b9a5036f8cf/Copying.txt"
+}

@@ -76,8 +76,13 @@ class PikafishProcess:
                 return
             if not self._executable.is_file():
                 raise FileNotFoundError(self._executable)
+            if self._eval_file is not None and not self._eval_file.is_file():
+                raise FileNotFoundError(self._eval_file)
             self._lines = Queue()
             creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+            working_directory = (
+                self._eval_file.parent if self._eval_file is not None else self._executable.parent
+            )
             self._process = subprocess.Popen(
                 [str(self._executable), *self._arguments],
                 stdin=subprocess.PIPE,
@@ -89,6 +94,7 @@ class PikafishProcess:
                 bufsize=1,
                 shell=False,
                 creationflags=creationflags,
+                cwd=working_directory,
             )
             self._reader = Thread(target=self._read_stdout, daemon=True, name="uci-reader")
             self._reader.start()
@@ -98,7 +104,7 @@ class PikafishProcess:
                 self._send(f"setoption name Threads value {self._threads}")
                 self._send(f"setoption name Hash value {self._hash_mb}")
                 if self._eval_file is not None:
-                    self._send(f"setoption name EvalFile value {self._eval_file}")
+                    self._send(f"setoption name EvalFile value {self._eval_file.name}")
                 self._send("isready")
                 self._wait_for("readyok", self._startup_timeout)
             except BaseException:
