@@ -1,0 +1,147 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from enum import StrEnum
+
+import numpy as np
+from numpy.typing import NDArray
+
+from xiangqi_agent.domain.board import BoardState, Move
+from xiangqi_agent.domain.rules import apply_move
+from xiangqi_agent.sync.move_observer import MoveObservation, MoveObserver, ObservationStatus
+from xiangqi_agent.vision.change_detection import analyze_frame_change
+from xiangqi_agent.vision.geometry import BoardGeometry
+
+
+class TrackingStatus(StrEnum):
+    WATCHING = "watching"
+    WAITING_FOR_STABLE = "waiting_for_stable"
+    ACCEPTED = "accepted"
+    PAUSED_AMBIGUOUS = "paused_ambiguous"
+
+
+@dataclass(frozen=True, slots=True)
+class TrackingUpdate:
+    status: TrackingStatus
+    board: BoardState
+    move: Move | None = None
+    observation: MoveObservation | None = None
+
+
+class StableMoveTracker:
+    """Gate visual move inference behind animation settling and ambiguity safety."""
+
+    def __init__(
+        self,
+        board: BoardState,
+        geometry: BoardGeometry,
+        observer: MoveObserver,
+        *,
+        required_stable_pairs: int = 2,
+        global_threshold: float = 1.5,
+        local_threshold: float = 3.0,
+        patch_size: int = 32,
+    ) -> None:
+        if required_stable_pairs <= 0:
+            raise ValueError("required_stable_pairs must be positive")
+        self._board = board
+        self._geometry = geometry
+        self._observer = observer
+        self._required_stable_pairs = required_stable_pairs
+        self._global_threshold = global_threshold
+        self._local_threshold = local_threshold
+        self._patch_size = patch_size
+        self._confirmed_frame: NDArray[np.uint8] | None = None
+        self._previous_frame: NDArray[np.uint8] | None = None
+        self._motion_seen = False
+        self._stable_pairs = 0
+        self._paused = False
+
+    @property
+    def board(self) -> BoardState:
+        return self._board
+
+    def initialize(self, frame: NDArray[np.generic]) -> TrackingUpdate:
+        current = _owned_frame(frame)
+        self._confirmed_frame = current.copy()
+        self._previous_frame = current
+        self._motion_seen = False
+        self._stable_pairs = 0
+        self._paused = False
+        return TrackingUpdate(TrackingStatus.WATCHING, self._board)
+
+    def push(self, frame: NDArray[np.generic]) -> TrackingUpdate:
+        if self._confirmed_frame is None or self._previous_frame is None:
+            raise RuntimeError("tracker must be initialized with a confirmed frame")
+        if self._paused:
+            return TrackingUpdate(TrackingStatus.PAUSED_AMBIGUOUS, self._board)
+
+        current = _owned_frame(frame)
+        change = analyze_frame_change(
+            self._previous_frame,
+            current,
+            self._geometry,
+            global_threshold=self._global_threshold,
+            local_threshold=self._local_threshold,
+            patch_size=self._patch_size,
+        )
+        self._previous_frame = current
+
+        if not change.stable:
+            self._motion_seen = True
+            self._stable_pairs = 0
+            return TrackingUpdate(TrackingStatus.WAITING_FOR_STABLE, self._board)
+        if not self._motion_seen:
+            return TrackingUpdate(TrackingStatus.WATCHING, self._board)
+
+        self._stable_pairs += 1
+        if self._stable_pairs < self._required_stable_pairs:
+            return TrackingUpdate(TrackingStatus.WAITING_FOR_STABLE, self._board)
+
+        observation = self._observer.observe(
+            self._board,
+            self._confirmed_frame,
+            current,
+            self._geometry,
+        )
+        if observation.status is ObservationStatus.ACCEPTED:
+            if observation.move is None or observation.after is None:
+                return self._pause(observation)
+            try:
+                verified_after = apply_move(self._board, observation.move)
+            except ValueError:
+                return self._pause(observation)
+            if observation.after != verified_after:
+                return self._pause(observation)
+            self._board = verified_after
+            self._confirmed_frame = current.copy()
+            self._motion_seen = False
+            self._stable_pairs = 0
+            return TrackingUpdate(
+                TrackingStatus.ACCEPTED,
+                self._board,
+                observation.move,
+                observation,
+            )
+        if observation.status is ObservationStatus.NO_CHANGE:
+            self._confirmed_frame = current.copy()
+            self._motion_seen = False
+            self._stable_pairs = 0
+            return TrackingUpdate(TrackingStatus.WATCHING, self._board)
+
+        return self._pause(observation)
+
+    def _pause(self, observation: MoveObservation) -> TrackingUpdate:
+        self._paused = True
+        return TrackingUpdate(
+            TrackingStatus.PAUSED_AMBIGUOUS,
+            self._board,
+            observation=observation,
+        )
+
+
+def _owned_frame(frame: NDArray[np.generic]) -> NDArray[np.uint8]:
+    pixels = np.asarray(frame)
+    if pixels.dtype != np.uint8 or pixels.ndim != 3 or pixels.shape[2] != 4:
+        raise ValueError("frame must be a BGRA uint8 image")
+    return np.array(pixels, dtype=np.uint8, copy=True, order="C")
