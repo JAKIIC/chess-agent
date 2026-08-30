@@ -36,6 +36,17 @@ def to_chinese(board: BoardState, move: Move) -> str:
     return f"{prefix}{name}{origin}{action}{detail}"
 
 
+def resolve_move_reference(board: BoardState, text: str) -> Move | None:
+    """Resolve one exact Chinese-notation move mention from the current legal moves."""
+    if not isinstance(text, str):
+        raise TypeError("move reference text must be a string")
+    normalized = "".join(text.split())
+    matches = tuple(
+        move for move in legal_moves(board) if to_chinese(board, move) in normalized
+    )
+    return matches[0] if len(matches) == 1 else None
+
+
 def _disambiguator(board: BoardState, source_index: int, kind: str, side: Side) -> str:
     _, source_column = divmod(source_index, 9)
     same_file = [

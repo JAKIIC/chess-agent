@@ -96,3 +96,8 @@ class SecretStore:
         import keyring
 
         keyring.set_password(self.SERVICE, self.USERNAME, value)
+
+    def delete_deepseek_key(self) -> None:
+        import keyring
+
+        keyring.delete_password(self.SERVICE, self.USERNAME)

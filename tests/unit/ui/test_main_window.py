@@ -4,6 +4,7 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt
 
+from xiangqi_agent.coach.client import DeepSeekClient
 from xiangqi_agent.domain.analysis import EngineAnalysis, EngineLine
 from xiangqi_agent.domain.board import BoardState
 from xiangqi_agent.ui.main_window import MainWindow
@@ -59,7 +60,12 @@ class ImmediateEngine:
 
 def test_main_window_loads_fen_and_replaces_quick_with_deep_result(qtbot: object) -> None:
     engine = ImmediateEngine()
-    window = MainWindow(engine=engine, quick_ms=20, deep_ms=100)
+    window = MainWindow(
+        engine=engine,
+        coach_client=DeepSeekClient(api_key=None),
+        quick_ms=20,
+        deep_ms=100,
+    )
     qtbot.addWidget(window)  # type: ignore[attr-defined]
     window.show()
 
@@ -77,13 +83,21 @@ def test_main_window_loads_fen_and_replaces_quick_with_deep_result(qtbot: object
     assert window.results.item(0, 2).text() == "16"
     assert [call[1] for call in engine.calls] == [20, 100]
 
+    window.coach_panel.question_input.setText("为什么推荐这一步？")
+    qtbot.mouseClick(window.coach_panel.ask_button, Qt.MouseButton.LeftButton)  # type: ignore[attr-defined]
+    qtbot.waitUntil(  # type: ignore[attr-defined]
+        lambda: window.coach_panel.visible_sections() == ("position_summary",), timeout=2000
+    )
+    assert "本地" in window.coach_panel.source_label.text()
+    assert "炮二平五" in window.coach_panel.candidate_label.text()
+
     window.close()
     assert engine.closed
 
 
 def test_invalid_fen_never_reaches_engine(qtbot: object) -> None:
     engine = ImmediateEngine()
-    window = MainWindow(engine=engine)
+    window = MainWindow(engine=engine, coach_client=DeepSeekClient(api_key=None))
     qtbot.addWidget(window)  # type: ignore[attr-defined]
     window.fen_input.setText("not a fen")
 
@@ -97,7 +111,10 @@ def test_invalid_fen_never_reaches_engine(qtbot: object) -> None:
 def test_missing_local_engine_shows_install_guidance_without_crashing(
     qtbot: object, tmp_path: Path
 ) -> None:
-    window = MainWindow(runtime_root=tmp_path)
+    window = MainWindow(
+        runtime_root=tmp_path,
+        coach_client=DeepSeekClient(api_key=None),
+    )
     qtbot.addWidget(window)  # type: ignore[attr-defined]
 
     assert not window.analyse_button.isEnabled()

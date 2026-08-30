@@ -83,14 +83,17 @@ def test_secret_store_only_delegates_to_monkeypatched_keyring(monkeypatch: pytes
     fake = type("FakeKeyring", (), {
         "get_password": staticmethod(lambda service, username: calls.append((service, username, None)) or "test-key"),
         "set_password": staticmethod(lambda service, username, value: calls.append((service, username, value))),
+        "delete_password": staticmethod(lambda service, username: calls.append((service, username, "deleted"))),
     })
     monkeypatch.setitem(__import__("sys").modules, "keyring", fake)
     store = SecretStore()
     assert store.get_deepseek_key() == "test-key"
     store.set_deepseek_key("new-test-key")
+    store.delete_deepseek_key()
     assert calls == [
         ("xiangqi-learning-agent", "deepseek-api-key", None),
         ("xiangqi-learning-agent", "deepseek-api-key", "new-test-key"),
+        ("xiangqi-learning-agent", "deepseek-api-key", "deleted"),
     ]
     with pytest.raises(ValueError):
         store.set_deepseek_key("  ")

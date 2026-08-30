@@ -2,11 +2,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from keyring.errors import KeyringError
 from PySide6.QtCore import QObject, Signal
 from PySide6.QtGui import QCloseEvent, QFont
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
+    QComboBox,
+    QDialog,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -15,20 +18,29 @@ from PySide6.QtWidgets import (
     QPushButton,
     QTableWidget,
     QTableWidgetItem,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
 
+from xiangqi_agent.coach.client import DeepSeekClient
+from xiangqi_agent.coach.evidence import build_evidence
+from xiangqi_agent.coach.service import CoachExplainer, CoachService
+from xiangqi_agent.config import SecretStore
 from xiangqi_agent.domain.analysis import EngineAnalysis
 from xiangqi_agent.domain.board import BoardState
+from xiangqi_agent.domain.coach import CoachEvidence, CoachExplanation
 from xiangqi_agent.domain.fen import parse_fen
+from xiangqi_agent.domain.notation import resolve_move_reference
 from xiangqi_agent.domain.rules import legal_moves
 from xiangqi_agent.engine.installer import load_installed_pikafish
 from xiangqi_agent.engine.process import PikafishProcess
 from xiangqi_agent.engine.service import AnalysisEngine, AnalysisService
 from xiangqi_agent.ui.analysis_view_model import analysis_rows
 from xiangqi_agent.ui.board_widget import BoardWidget
+from xiangqi_agent.ui.coach_panel import CoachPanel
 from xiangqi_agent.ui.fonts import ensure_cjk_font
+from xiangqi_agent.ui.settings_dialog import DeepSeekSettingsDialog
 
 START_FEN = "rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w"
 
@@ -37,6 +49,8 @@ class _AnalysisBridge(QObject):
     quick = Signal(object)
     deep = Signal(object)
     failed = Signal(str)
+    coach_ready = Signal(object)
+    coach_failed = Signal(str)
 
 
 class MainWindow(QMainWindow):
@@ -44,6 +58,7 @@ class MainWindow(QMainWindow):
         self,
         *,
         engine: AnalysisEngine | None = None,
+        coach_client: CoachExplainer | None = None,
         runtime_root: Path | None = None,
         quick_ms: int = 500,
         deep_ms: int = 3000,
@@ -55,10 +70,15 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("天天象棋学习助手")
         self.resize(1180, 760)
         self._board: BoardState | None = None
+        self._latest_analysis: EngineAnalysis | None = None
+        self._active_evidence: CoachEvidence | None = None
+        self._secret_store = SecretStore()
         self._bridge = _AnalysisBridge(self)
         self._bridge.quick.connect(self._show_quick)
         self._bridge.deep.connect(self._show_deep)
         self._bridge.failed.connect(self._show_error)
+        self._bridge.coach_ready.connect(self._show_coach)
+        self._bridge.coach_failed.connect(self._show_coach_error)
         self._service: AnalysisService | None = None
 
         self.board_widget = BoardWidget()
@@ -70,6 +90,14 @@ class MainWindow(QMainWindow):
         self.guidance_label = QLabel()
         self.guidance_label.setWordWrap(True)
         self.guidance_label.setStyleSheet("color: #8a4b08;")
+        self.coach_panel = CoachPanel()
+        self.coach_panel.question_submitted.connect(self._ask_coach)
+        self.user_side_combo = QComboBox()
+        self.user_side_combo.addItem("我是红方", "w")
+        self.user_side_combo.addItem("我是黑方", "b")
+        self.settings_button = QPushButton("DeepSeek 设置")
+        self.settings_button.clicked.connect(self._open_coach_settings)
+        self.tabs = QTabWidget()
         self.results = QTableWidget(0, 5)
         self.results.setHorizontalHeaderLabels(
             ["推荐走法", "评分（红方）", "深度", "主要变化", "UCI"]
@@ -83,6 +111,12 @@ class MainWindow(QMainWindow):
         self.board_widget.set_board(self._board)
 
         self._build_layout()
+        resolved_coach = coach_client or self._load_default_coach()
+        self._coach_service = CoachService(
+            resolved_coach,
+            on_ready=self._bridge.coach_ready.emit,
+            on_error=self._bridge.coach_failed.emit,
+        )
         resolved_engine = engine or self._load_default_engine(runtime_root or Path.cwd())
         if resolved_engine is None:
             self.analyse_button.setEnabled(False)
@@ -118,11 +152,45 @@ class MainWindow(QMainWindow):
         right.addWidget(QLabel("当前局面 FEN"))
         right.addWidget(self.fen_input)
         right.addWidget(self.analyse_button)
-        right.addWidget(self.phase_label)
-        right.addWidget(self.guidance_label)
-        right.addWidget(self.results, 1)
+        analysis_tab = QWidget()
+        analysis_layout = QVBoxLayout(analysis_tab)
+        analysis_layout.addWidget(self.phase_label)
+        analysis_layout.addWidget(self.guidance_label)
+        analysis_layout.addWidget(self.results, 1)
+        self.tabs.addTab(analysis_tab, "分析")
+
+        coach_tab = QWidget()
+        coach_layout = QVBoxLayout(coach_tab)
+        coach_header = QHBoxLayout()
+        coach_header.addWidget(self.user_side_combo)
+        coach_header.addStretch(1)
+        coach_header.addWidget(self.settings_button)
+        coach_layout.addLayout(coach_header)
+        coach_layout.addWidget(self.coach_panel, 1)
+        self.tabs.addTab(coach_tab, "教练")
+        right.addWidget(self.tabs, 1)
         root.addLayout(right, 7)
         self.setCentralWidget(panel)
+
+    def _load_default_coach(self) -> DeepSeekClient:
+        try:
+            api_key = self._secret_store.get_deepseek_key()
+        except KeyringError:
+            api_key = None
+        return DeepSeekClient(api_key=api_key)
+
+    def _open_coach_settings(self) -> None:
+        dialog = DeepSeekSettingsDialog(self._secret_store, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        self._coach_service.close()
+        self._coach_service = CoachService(
+            self._load_default_coach(),
+            on_ready=self._bridge.coach_ready.emit,
+            on_error=self._bridge.coach_failed.emit,
+        )
+        self._active_evidence = None
+        self.coach_panel.clear_explanation("DeepSeek 设置已更新；请重新提问")
 
     def _load_default_engine(self, runtime_root: Path) -> PikafishProcess | None:
         try:
@@ -151,6 +219,10 @@ class MainWindow(QMainWindow):
             self.phase_label.setText(f"FEN 无效：{exc}")
             return
         self._board = board
+        self._latest_analysis = None
+        self._active_evidence = None
+        self._coach_service.clear()
+        self.coach_panel.clear_explanation("等待当前局面的引擎证据")
         self.board_widget.set_board(board)
         self.results.setRowCount(0)
         self.phase_label.setText("正在进行快速分析…")
@@ -160,18 +232,52 @@ class MainWindow(QMainWindow):
         if not self._is_current(analysis):
             return
         self._render_analysis(analysis)
+        self._latest_analysis = analysis
+        self.coach_panel.clear_explanation("快速证据已就绪，可以开始提问")
         self.phase_label.setText(f"快速分析 · 深度 {analysis.depth} · 正在继续加深…")
 
     def _show_deep(self, analysis: EngineAnalysis) -> None:
         if not self._is_current(analysis):
             return
         self._render_analysis(analysis)
+        self._latest_analysis = analysis
+        self.coach_panel.clear_explanation("加深证据已就绪，可以开始提问")
         self.phase_label.setText(
             f"加深分析 · 深度 {analysis.depth} · {analysis.duration_ms} ms"
         )
 
     def _show_error(self, message: str) -> None:
         self.phase_label.setText(f"分析暂停：{message}")
+
+    def _ask_coach(self, question: str) -> None:
+        board = self._board
+        analysis = self._latest_analysis
+        if board is None or analysis is None:
+            self.coach_panel.clear_explanation("请先完成当前局面的引擎分析")
+            return
+        user_side = self.user_side_combo.currentData()
+        if user_side not in ("w", "b"):
+            self.coach_panel.clear_explanation("请选择执红或执黑")
+            return
+        evidence = build_evidence(board, analysis, user_side=user_side)
+        self._active_evidence = evidence
+        referenced = resolve_move_reference(board, question)
+        message = "正在生成证据约束的解释…"
+        if referenced is not None and referenced.uci not in {
+            candidate.uci for candidate in evidence.candidates
+        }:
+            message += "（已识别你的走法，但尚未进行分支评分）"
+        self.coach_panel.clear_explanation(message)
+        self._coach_service.submit(evidence, question)
+
+    def _show_coach(self, explanation: CoachExplanation) -> None:
+        evidence = self._active_evidence
+        if evidence is None or explanation.position_id != evidence.position_id:
+            return
+        self.coach_panel.set_explanation(explanation, evidence.allowed_move_map)
+
+    def _show_coach_error(self, message: str) -> None:
+        self.coach_panel.clear_explanation(f"教练暂停：{message}")
 
     def _is_current(self, analysis: EngineAnalysis) -> bool:
         return self._board is not None and analysis.position_id == self._board.position_id
@@ -192,6 +298,7 @@ class MainWindow(QMainWindow):
         self.results.resizeColumnToContents(4)
 
     def closeEvent(self, event: QCloseEvent) -> None:
+        self._coach_service.close()
         if self._service is not None:
             self._service.close()
         super().closeEvent(event)
