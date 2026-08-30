@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+from math import exp
 
 import numpy as np
 from numpy.typing import NDArray
@@ -19,6 +20,7 @@ class TemplateMatch:
     expected_symbol: str
     distance: float
     margin: float
+    confidence: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,23 +67,62 @@ class PieceTemplateBank:
 
     def match(self, expected_symbol: str, patch: NDArray[np.generic]) -> TemplateMatch:
         expected = _validate_symbol(expected_symbol, self._examples)
+        return self.match_any(frozenset({expected}), patch)
+
+    def match_any(
+        self,
+        expected_symbols: frozenset[str],
+        patch: NDArray[np.generic],
+    ) -> TemplateMatch:
+        if not expected_symbols:
+            raise ValueError("expected template group must not be empty")
+        unknown = expected_symbols - self.symbols
+        if unknown:
+            raise ValueError("expected template group contains an unknown symbol")
+        expected_groups = {_semantic_group(symbol) for symbol in expected_symbols}
+        if len(expected_groups) != 1:
+            raise ValueError("expected templates must belong to one semantic group")
         candidate = _feature(patch)
         distances = {
             symbol: _minimum_distance(examples, candidate)
             for symbol, examples in self._examples.items()
         }
-        expected_distance = distances[expected]
+        expected, expected_distance = min(
+            ((symbol, distances[symbol]) for symbol in expected_symbols),
+            key=lambda item: (item[1], item[0]),
+        )
         alternatives = tuple(
-            distance for symbol, distance in distances.items() if symbol != expected
+            distance for symbol, distance in distances.items() if symbol not in expected_symbols
         )
         margin = min(alternatives) - expected_distance if alternatives else float("inf")
-        return TemplateMatch(expected, expected_distance, margin)
+        group_distances = {
+            group: min(
+                distance
+                for symbol, distance in distances.items()
+                if _semantic_group(symbol) == group
+            )
+            for group in {_semantic_group(symbol) for symbol in distances}
+        }
+        floor = min(group_distances.values())
+        group_weights = {
+            group: exp(-(distance - floor) / 0.008)
+            for group, distance in group_distances.items()
+        }
+        expected_group = expected_groups.pop()
+        confidence = group_weights[expected_group] / sum(group_weights.values())
+        return TemplateMatch(expected, expected_distance, margin, confidence)
 
 
 def _validate_symbol(symbol: str, examples: Mapping[str, object]) -> str:
     if symbol not in examples:
         raise ValueError("unknown Xiangqi template symbol")
     return symbol
+
+
+def _semantic_group(symbol: str) -> str:
+    if symbol == ".":
+        return "empty"
+    return "red" if symbol.isupper() else "black"
 
 
 def _feature(patch: NDArray[np.generic]) -> NDArray[np.float32]:

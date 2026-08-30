@@ -29,6 +29,8 @@ class CandidateScore:
     source_expected_distance: float
     destination_expected_distance: float
     semantic_margin: float
+    source_semantic_confidence: float
+    destination_semantic_confidence: float
     score: float
 
 
@@ -145,8 +147,8 @@ class LegalMoveDiffObserver:
             ),
         )
         semantic_confidence = min(
-            1.0,
-            best.semantic_margin / (best.semantic_margin + semantic_distance + 1e-6),
+            best.source_semantic_confidence,
+            best.destination_semantic_confidence,
         )
         confidence = min(visual_confidence, semantic_confidence)
         supported = (
@@ -198,9 +200,15 @@ def _score_candidate(
         (difference for index, difference in enumerate(local) if index not in excluded),
         default=0.0,
     )
-    source_match = templates.match(".", after_patches[move.from_index])
-    destination_match = templates.match(
-        board.pieces[move.from_index],
+    source_match = templates.match_any(frozenset({"."}), after_patches[move.from_index])
+    moving_symbol = board.pieces[move.from_index]
+    same_side_symbols = frozenset(
+        symbol
+        for symbol in templates.symbols
+        if symbol != "." and symbol.isupper() == moving_symbol.isupper()
+    )
+    destination_match = templates.match_any(
+        same_side_symbols,
         after_patches[move.to_index],
     )
     return CandidateScore(
@@ -211,6 +219,8 @@ def _score_candidate(
         source_expected_distance=source_match.distance,
         destination_expected_distance=destination_match.distance,
         semantic_margin=min(source_match.margin, destination_match.margin),
+        source_semantic_confidence=source_match.confidence,
+        destination_semantic_confidence=destination_match.confidence,
         score=min(source, destination) - unexpected,
     )
 

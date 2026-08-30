@@ -95,19 +95,12 @@ def test_observer_rejects_two_highlighted_intersections_when_no_piece_moved() ->
     assert result.after is None
 
 
-def test_observer_rejects_a_candidate_with_low_combined_semantic_confidence() -> None:
+def test_observer_honors_a_stricter_configured_minimum_confidence() -> None:
     board = parse_fen(START)
     move = _move(board, "h2e2")
     after = _render(apply_move(board, move))
-    for index, value in ((move.from_index, PALETTE["."] + 3), (move.to_index, PALETTE["C"] - 3)):
-        row, column = divmod(index, 9)
-        after[
-            row * CELL : (row + 1) * CELL,
-            column * CELL : (column + 1) * CELL,
-            :3,
-        ] = value
 
-    result = LegalMoveDiffObserver(patch_size=CELL).observe(
+    result = LegalMoveDiffObserver(patch_size=CELL, min_confidence=0.999).observe(
         board,
         _render(board),
         after,
@@ -117,6 +110,110 @@ def test_observer_rejects_a_candidate_with_low_combined_semantic_confidence() ->
     assert result.status is ObservationStatus.AMBIGUOUS
     assert result.move is None
     assert result.after is None
+
+
+def test_observer_keeps_the_default_semantic_margin_above_one_sample() -> None:
+    board = parse_fen(START)
+    move = _move(board, "h2e2")
+    before = _render(board)
+    after = before.copy()
+    for index, value in ((move.from_index, PALETTE["."]), (move.to_index, 125)):
+        row, column = divmod(index, 9)
+        after[
+            row * CELL : (row + 1) * CELL,
+            column * CELL : (column + 1) * CELL,
+            :3,
+        ] = value
+
+    result = LegalMoveDiffObserver(patch_size=CELL).observe(
+        board,
+        before,
+        after,
+        _geometry(),
+    )
+
+    assert result.candidates[0].semantic_margin == pytest.approx(5 / 255, abs=1e-6)
+    assert result.candidates[0].destination_semantic_confidence > 0.8
+    assert result.status is ObservationStatus.AMBIGUOUS
+    assert result.move is None
+    assert result.after is None
+
+
+def test_observer_accepts_same_side_piece_appearance_variation_at_destination() -> None:
+    board = parse_fen(START)
+    move = _move(board, "h2e2")
+    after = _render(apply_move(board, move))
+    destination_row, destination_column = divmod(move.to_index, 9)
+    after[
+        destination_row * CELL : (destination_row + 1) * CELL,
+        destination_column * CELL : (destination_column + 1) * CELL,
+        :3,
+    ] = PALETTE["P"]
+
+    result = LegalMoveDiffObserver(patch_size=CELL).observe(
+        board,
+        _render(board),
+        after,
+        _geometry(),
+    )
+
+    assert result.status is ObservationStatus.ACCEPTED
+    assert result.move == move
+    assert result.after == apply_move(board, move)
+
+
+def test_observer_rejects_opposite_side_appearance_at_destination() -> None:
+    board = parse_fen(START)
+    move = _move(board, "h2e2")
+    before = _render(board)
+    after = before.copy()
+    for index, value in ((move.from_index, PALETTE["."]), (move.to_index, PALETTE["k"])):
+        row, column = divmod(index, 9)
+        after[
+            row * CELL : (row + 1) * CELL,
+            column * CELL : (column + 1) * CELL,
+            :3,
+        ] = value
+
+    result = LegalMoveDiffObserver(patch_size=CELL).observe(
+        board,
+        before,
+        after,
+        _geometry(),
+    )
+
+    assert result.status is ObservationStatus.AMBIGUOUS
+    assert result.move is None
+    assert result.after is None
+
+
+def test_observer_applies_the_configured_confidence_boundary() -> None:
+    board = parse_fen(START)
+    move = _move(board, "h2e2")
+    before = _render(board)
+    after = before.copy()
+    for index, value in ((move.from_index, PALETTE["."]), (move.to_index, 126)):
+        row, column = divmod(index, 9)
+        after[
+            row * CELL : (row + 1) * CELL,
+            column * CELL : (column + 1) * CELL,
+            :3,
+        ] = value
+
+    accepted = LegalMoveDiffObserver(
+        patch_size=CELL,
+        min_semantic_margin=0.01,
+        min_confidence=0.8,
+    ).observe(board, before, after, _geometry())
+    rejected = LegalMoveDiffObserver(
+        patch_size=CELL,
+        min_semantic_margin=0.01,
+        min_confidence=0.82,
+    ).observe(board, before, after, _geometry())
+
+    assert accepted.status is ObservationStatus.ACCEPTED
+    assert 0.8 < accepted.confidence < 0.82
+    assert rejected.status is ObservationStatus.AMBIGUOUS
 
 
 def test_observer_pauses_when_two_legal_moves_appear_between_frames() -> None:

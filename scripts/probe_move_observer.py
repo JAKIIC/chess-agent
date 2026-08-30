@@ -97,6 +97,13 @@ def main() -> int:
                                 4,
                             ),
                             "semantic_margin": round(candidate.semantic_margin, 4),
+                            "semantic_confidence": round(
+                                min(
+                                    candidate.source_semantic_confidence,
+                                    candidate.destination_semantic_confidence,
+                                ),
+                                4,
+                            ),
                         }
                         for candidate in observation.candidates[:5]
                     ]
