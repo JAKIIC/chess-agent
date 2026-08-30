@@ -154,17 +154,23 @@ def _features(
     target_change: float,
     best_shift: tuple[int, int],
 ) -> EndpointFeatures:
-    evidence_score = 1.0 / (1.0 + 4.0 * max(0.0, instance))
+    stable_instance = _stable_float(instance)
+    evidence_score = 1.0 / (1.0 + 4.0 * max(0.0, stable_instance))
     return EndpointFeatures(
         feature_version=version,
-        instance_distance=float(instance),
-        instance_evidence_score=float(evidence_score),
-        color_distance=float(color),
-        gradient_distance=float(gradient),
-        source_change_distance=float(source_change),
-        target_change_distance=float(target_change),
+        instance_distance=stable_instance,
+        instance_evidence_score=_stable_float(evidence_score),
+        color_distance=_stable_float(color),
+        gradient_distance=_stable_float(gradient),
+        source_change_distance=_stable_float(source_change),
+        target_change_distance=_stable_float(target_change),
         best_shift=best_shift,
     )
+
+
+def _stable_float(value: float) -> float:
+    """Remove sub-nanoscopic OpenCV SIMD reduction jitter from replay output."""
+    return round(float(value), 8)
 
 
 def _validate_crops(crops: EndpointCrops) -> None:

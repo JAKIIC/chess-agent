@@ -29,7 +29,7 @@ def _sample(*, sample_id: str = "sample-1", session_id: str = "session-1") -> En
         sample_kind=SampleKind.MOVE,
         created_at_utc="2026-08-30T12:00:00Z",
         confirmed_fen=START,
-        confirmed_position_id="2af65e72bfc2c5c2a697f39c986df391",
+        confirmed_position_id="132bdaf223100c4bd42ae8b81f0fb96c",
         actual_uci="i0h0",
         probe_uci="i0h0",
         side_to_move="w",
