@@ -4,12 +4,25 @@ import argparse
 import json
 from collections.abc import Callable
 from dataclasses import replace
+from datetime import UTC, datetime
+from hashlib import sha256
+from pathlib import Path
 from queue import Empty, Queue
 from time import monotonic, perf_counter_ns
+from uuid import uuid4
+
+import numpy as np
 
 from xiangqi_agent.capture.adaptive_sampling import AdaptiveBurstSampler
+from xiangqi_agent.capture.context import CaptureContext
 from xiangqi_agent.capture.protocol import CaptureClosedError, CaptureFrame
 from xiangqi_agent.capture.windows_capture_source import WindowsCaptureSource
+from xiangqi_agent.diagnostics.endpoint_samples import (
+    EndpointCrops,
+    EndpointSampleRecorder,
+    EndpointSampleV1,
+    SampleKind,
+)
 from xiangqi_agent.domain.board import BoardState, Orientation
 from xiangqi_agent.domain.fen import parse_fen
 from xiangqi_agent.domain.notation import to_chinese
@@ -22,6 +35,7 @@ from xiangqi_agent.vision.geometry import BoardGeometry, parse_normalized_quad
 from xiangqi_agent.vision.templates import PieceTemplateBank
 
 START_FEN = "rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w"
+THRESHOLD_PROFILE_VERSION = "live-strict-v2"
 
 
 def main() -> int:
@@ -34,6 +48,7 @@ def main() -> int:
         try:
             baseline, geometry = _stable_baseline(events, args)
             board = _parse_board(args.fen, geometry.orientation)
+            capture_context = _capture_context(window.client_size, baseline, geometry, board)
             templates = PieceTemplateBank.from_position(
                 board,
                 geometry,
@@ -100,6 +115,22 @@ def main() -> int:
                     }
                     if observation is not None:
                         result.update(_proposal_details(observation))
+                        endpoint_crops = _event_endpoint_crops(
+                            observation,
+                            baseline,
+                            sample,
+                            geometry,
+                        )
+                        if endpoint_crops is not None:
+                            endpoint_sample_id = _maybe_record_endpoint_sample(
+                                args,
+                                board,
+                                observation,
+                                endpoint_crops,
+                                capture_context,
+                            )
+                            if endpoint_sample_id is not None:
+                                result["endpoint_sample_id"] = endpoint_sample_id
                     if update.move is not None:
                         result["uci"] = update.move.uci
                         result["chinese"] = to_chinese(board, update.move)
@@ -244,7 +275,7 @@ def _parse_board(fen: str, orientation: Orientation) -> BoardState:
 
 
 def _proposal_details(proposal: MoveProposal) -> dict[str, object]:
-    return {
+    payload: dict[str, object] = {
         "evidence_score": round(proposal.evidence_score, 4),
         "rejection_reasons": list(proposal.evidence.rejection_reasons),
         "top_candidates": [
@@ -273,6 +304,129 @@ def _proposal_details(proposal: MoveProposal) -> dict[str, object]:
             for candidate in proposal.evidence.candidates[:5]
         ],
     }
+    if proposal.evidence.endpoint_features is not None:
+        features = proposal.evidence.endpoint_features
+        payload["endpoint_features"] = {
+            "feature_version": features.feature_version,
+            "instance_distance": features.instance_distance,
+            "instance_evidence_score": features.instance_evidence_score,
+            "color_distance": features.color_distance,
+            "gradient_distance": features.gradient_distance,
+            "source_change_distance": features.source_change_distance,
+            "target_change_distance": features.target_change_distance,
+            "best_shift": features.best_shift,
+        }
+    return payload
+
+
+def _event_endpoint_crops(
+    proposal: MoveProposal,
+    before: CaptureFrame,
+    after: CaptureFrame,
+    geometry: BoardGeometry,
+) -> EndpointCrops | None:
+    if not proposal.evidence.candidates:
+        return None
+    candidate = proposal.evidence.candidates[0]
+    before_patches = geometry.crop_intersections(before.bgra, size=48)
+    after_patches = geometry.crop_intersections(after.bgra, size=48)
+    return EndpointCrops(
+        source_before=before_patches[candidate.move.from_index],
+        source_after=after_patches[candidate.move.from_index],
+        target_before=before_patches[candidate.move.to_index],
+        target_after=after_patches[candidate.move.to_index],
+    )
+
+
+def _maybe_record_endpoint_sample(
+    args: argparse.Namespace,
+    board: BoardState,
+    proposal: MoveProposal,
+    crops: EndpointCrops,
+    capture_context: CaptureContext,
+) -> str | None:
+    if not args.record_endpoints:
+        return None
+    if not proposal.evidence.candidates:
+        return None
+    best = proposal.evidence.candidates[0]
+    sample_id = uuid4().hex
+    top_k: list[dict[str, str | float]] = []
+    for candidate in proposal.evidence.candidates[:5]:
+        top_k.append(
+            {
+            "uci": candidate.move.uci,
+            "score": candidate.score,
+            "source_difference": candidate.source_difference,
+            "destination_difference": candidate.destination_difference,
+            "unexpected_difference": candidate.unexpected_difference,
+            "semantic_margin": candidate.semantic_margin,
+            }
+        )
+    metadata = EndpointSampleV1(
+        sample_id=sample_id,
+        session_id=args.session_id,
+        sample_kind=SampleKind(args.sample_kind),
+        created_at_utc=datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+        confirmed_fen=board.fen,
+        confirmed_position_id=board.position_id,
+        actual_uci=args.actual_uci,
+        probe_uci=best.move.uci,
+        side_to_move=board.side_to_move,
+        orientation=board.orientation,
+        source_index=best.move.from_index,
+        target_index=best.move.to_index,
+        top_k_candidates=tuple(top_k),
+        rejection_reasons=proposal.evidence.rejection_reasons,
+        capture_context=capture_context,
+        feature_version=(
+            proposal.evidence.endpoint_features.feature_version
+            if proposal.evidence.endpoint_features is not None
+            else "none"
+        ),
+        threshold_profile_version=THRESHOLD_PROFILE_VERSION,
+        change_scores={
+            "source": best.source_difference,
+            "target": best.destination_difference,
+            "outside": best.unexpected_difference,
+        },
+    )
+    EndpointSampleRecorder(args.sample_root, enabled=True).record(metadata, crops)
+    return sample_id
+
+
+def _capture_context(
+    client_size: tuple[int, int],
+    baseline: CaptureFrame,
+    geometry: BoardGeometry,
+    board: BoardState,
+) -> CaptureContext:
+    dpi_scale = baseline.size[0] / client_size[0]
+    geometry_revision = sha256(
+        repr((geometry.quad.points, geometry.frame_size, geometry.orientation.value)).encode("ascii")
+    ).hexdigest()[:16]
+    empty_patches = tuple(
+        patch
+        for symbol, patch in zip(
+            board.pieces,
+            geometry.crop_intersections(baseline.bgra, size=16),
+            strict=True,
+        )
+        if symbol == "."
+    )[:8]
+    summary = np.asarray(
+        [patch[..., :3].mean(axis=(0, 1)) for patch in empty_patches],
+        dtype=np.float32,
+    )
+    theme_fingerprint = sha256(summary.tobytes()).hexdigest()[:16]
+    return CaptureContext(
+        wgc_size=baseline.size,
+        client_size=client_size,
+        dpi_scale=dpi_scale,
+        geometry_revision=geometry_revision,
+        theme_fingerprint=theme_fingerprint,
+        generation_id=baseline.timestamp_ns,
+    )
 
 
 def _parse_args() -> argparse.Namespace:
@@ -292,6 +446,15 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--baseline-timeout", type=float, default=10.0)
     parser.add_argument("--stable-pairs", type=int, default=2)
     parser.add_argument("--patch-size", type=int, default=48)
+    parser.add_argument("--record-endpoints", action="store_true")
+    parser.add_argument("--sample-root", type=Path, default=Path(".local/endpoint-samples"))
+    parser.add_argument("--session-id")
+    parser.add_argument("--actual-uci")
+    parser.add_argument(
+        "--sample-kind",
+        choices=tuple(item.value for item in SampleKind),
+        default=SampleKind.MOVE.value,
+    )
     args = parser.parse_args()
     if (
         args.fps <= 0
@@ -303,6 +466,14 @@ def _parse_args() -> argparse.Namespace:
         parser.error("capture rates and timeouts must be positive")
     if args.stable_pairs <= 0 or args.patch_size <= 0:
         parser.error("stable-pairs and patch-size must be positive")
+    if args.record_endpoints and not args.session_id:
+        parser.error("--session-id is required when --record-endpoints is enabled")
+    if (
+        args.record_endpoints
+        and args.sample_kind == SampleKind.MOVE.value
+        and not args.actual_uci
+    ):
+        parser.error("--actual-uci is required for a recorded move sample")
     return args
 
 

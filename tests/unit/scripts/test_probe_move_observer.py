@@ -1,5 +1,6 @@
 import sys
 from argparse import Namespace
+from pathlib import Path
 from queue import Queue
 from time import monotonic
 
@@ -8,14 +9,18 @@ import pytest
 
 import scripts.probe_move_observer as probe
 from xiangqi_agent.capture.adaptive_sampling import AdaptiveBurstSampler
+from xiangqi_agent.capture.context import CaptureContext
 from xiangqi_agent.capture.protocol import CaptureClosedError, CaptureFrame
+from xiangqi_agent.diagnostics.endpoint_samples import EndpointCrops
 from xiangqi_agent.domain.board import Move, Orientation
+from xiangqi_agent.domain.fen import parse_fen
 from xiangqi_agent.sync.evidence import (
     CandidateEvidence,
     MoveEvidence,
     MoveProposal,
     ObservationStatus,
 )
+from xiangqi_agent.vision.endpoint_features import EndpointFeatures
 
 
 def _frame(timestamp_ns: int = 1, *, shape: tuple[int, int] = (2, 2)) -> CaptureFrame:
@@ -235,6 +240,7 @@ def test_probe_defaults_to_high_rate_capture_with_two_fps_steady_logic(
     assert args.fps == 2
     assert args.capture_fps == 20
     assert args.settle_ms == 100
+    assert not args.record_endpoints
 
 
 def test_probe_serializes_evidence_without_probability_like_confidence_names() -> None:
@@ -263,3 +269,94 @@ def test_probe_serializes_evidence_without_probability_like_confidence_names() -
     assert payload["rejection_reasons"] == ["candidate_margin"]
     assert payload["top_candidates"][0]["semantic_evidence_score"] == 0.8
     assert "confidence" not in str(payload)
+
+
+def _recording_proposal() -> MoveProposal:
+    candidate = CandidateEvidence(
+        move=Move("h2e2", 70, 67),
+        source_difference=14.0,
+        destination_difference=27.0,
+        unexpected_difference=1.0,
+        source_expected_distance=0.1,
+        destination_expected_distance=0.1,
+        semantic_margin=0.03,
+        source_semantic_evidence_score=0.9,
+        destination_semantic_evidence_score=0.9,
+        score=13.0,
+    )
+    features = EndpointFeatures(
+        feature_version="instance-transfer-v1",
+        instance_distance=0.1,
+        instance_evidence_score=0.8,
+        color_distance=0.1,
+        gradient_distance=0.1,
+        source_change_distance=0.3,
+        target_change_distance=0.3,
+        best_shift=(0, 0),
+    )
+    return MoveProposal(
+        status=ObservationStatus.ACCEPTED,
+        move=candidate.move,
+        evidence_score=0.8,
+        evidence=MoveEvidence((candidate,), (0.0,) * 90, (), features),
+    )
+
+
+def _endpoint_crops() -> EndpointCrops:
+    values = [np.full((48, 48, 4), value, dtype=np.uint8) for value in (20, 40, 60, 80)]
+    for value in values:
+        value[..., 3] = 255
+    return EndpointCrops(*values)
+
+
+def _capture_context() -> CaptureContext:
+    return CaptureContext((200, 300), (200, 300), 1.0, "quad-v1", "theme-v1", 1)
+
+
+def test_probe_does_not_write_endpoint_samples_without_explicit_opt_in(tmp_path: Path) -> None:
+    args = Namespace(
+        record_endpoints=False,
+        sample_root=tmp_path,
+        session_id=None,
+        actual_uci="h2e2",
+        sample_kind="move",
+    )
+
+    sample_id = probe._maybe_record_endpoint_sample(
+        args,
+        parse_fen(probe.START_FEN),
+        _recording_proposal(),
+        _endpoint_crops(),
+        _capture_context(),
+    )
+
+    assert sample_id is None
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_probe_opt_in_writes_only_one_four_crop_sample(tmp_path: Path) -> None:
+    args = Namespace(
+        record_endpoints=True,
+        sample_root=tmp_path,
+        session_id="session-1",
+        actual_uci="h2e2",
+        sample_kind="move",
+    )
+
+    sample_id = probe._maybe_record_endpoint_sample(
+        args,
+        parse_fen(probe.START_FEN),
+        _recording_proposal(),
+        _endpoint_crops(),
+        _capture_context(),
+    )
+
+    assert sample_id is not None
+    files = sorted(path.name for path in (tmp_path / "session-1" / sample_id).iterdir())
+    assert files == [
+        "manifest.json",
+        "source_after.png",
+        "source_before.png",
+        "target_after.png",
+        "target_before.png",
+    ]
