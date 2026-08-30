@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 
 from xiangqi_agent.domain.board import Move
+from xiangqi_agent.vision.endpoint_features import EndpointFeatures
 
 
 class ObservationStatus(StrEnum):
@@ -31,6 +32,7 @@ class MoveEvidence:
     candidates: tuple[CandidateEvidence, ...]
     local_differences: tuple[float, ...]
     rejection_reasons: tuple[str, ...]
+    endpoint_features: EndpointFeatures | None = None
 
 
 @dataclass(frozen=True, slots=True)

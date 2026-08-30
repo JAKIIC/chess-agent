@@ -5,6 +5,7 @@ from xiangqi_agent.domain.board import BoardState
 from xiangqi_agent.domain.fen import parse_fen
 from xiangqi_agent.domain.rules import apply_move, legal_moves
 from xiangqi_agent.sync.move_observer import LegalMoveDiffObserver, ObservationStatus
+from xiangqi_agent.vision.endpoint_features import EndpointFeatures
 from xiangqi_agent.vision.geometry import BoardGeometry, NormalizedQuad
 
 START = "rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w"
@@ -53,6 +54,8 @@ def test_observer_accepts_the_unique_legal_origin_and_destination_pair() -> None
     assert not hasattr(result, "after")
     assert result.evidence_score > 0.9
     assert result.evidence.candidates[0].move.uci == "h2e2"
+    assert result.evidence.endpoint_features is not None
+    assert result.evidence.endpoint_features.feature_version == "instance-transfer-v1"
 
 
 def test_observer_does_not_accept_only_one_changed_intersection() -> None:
@@ -161,6 +164,41 @@ def test_observer_accepts_same_side_piece_appearance_variation_at_destination() 
     assert result.status is ObservationStatus.ACCEPTED
     assert result.move == move
     assert not hasattr(result, "after")
+
+
+def test_observer_rejects_when_instance_transfer_is_the_only_failed_hard_gate() -> None:
+    board = parse_fen(START)
+    move = _move(board, "h2e2")
+    after = _render(apply_move(board, move))
+    destination_row, destination_column = divmod(move.to_index, 9)
+    after[
+        destination_row * CELL : (destination_row + 1) * CELL,
+        destination_column * CELL : (destination_column + 1) * CELL,
+        :3,
+    ] = PALETTE["P"]
+
+    class FailedInstanceExtractor:
+        version = "failed-instance-test-v1"
+
+        def extract(self, _crops: object) -> EndpointFeatures:
+            return EndpointFeatures(
+                feature_version=self.version,
+                instance_distance=0.5,
+                instance_evidence_score=0.2,
+                color_distance=0.5,
+                gradient_distance=0.5,
+                source_change_distance=0.5,
+                target_change_distance=0.5,
+                best_shift=(0, 0),
+            )
+
+    result = LegalMoveDiffObserver(
+        patch_size=CELL,
+        feature_extractor=FailedInstanceExtractor(),
+    ).observe(board, _render(board), after, _geometry())
+
+    assert result.status is ObservationStatus.AMBIGUOUS
+    assert "instance" in result.evidence.rejection_reasons
 
 
 def test_observer_rejects_opposite_side_appearance_at_destination() -> None:

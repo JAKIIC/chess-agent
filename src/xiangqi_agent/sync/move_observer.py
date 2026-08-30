@@ -3,9 +3,11 @@ from __future__ import annotations
 from math import isfinite
 from typing import Protocol
 
+import cv2
 import numpy as np
 from numpy.typing import NDArray
 
+from xiangqi_agent.diagnostics.endpoint_samples import EndpointCrops
 from xiangqi_agent.domain.board import BoardState, Move
 from xiangqi_agent.domain.rules import legal_moves
 from xiangqi_agent.sync.evidence import (
@@ -13,6 +15,12 @@ from xiangqi_agent.sync.evidence import (
     MoveEvidence,
     MoveProposal,
     ObservationStatus,
+)
+from xiangqi_agent.sync.semantic_gate import MoveSemanticGate, SemanticThresholds
+from xiangqi_agent.vision.endpoint_features import (
+    EndpointFeatureExtractor,
+    EndpointFeatures,
+    InstanceTransferExtractor,
 )
 from xiangqi_agent.vision.geometry import BoardGeometry
 from xiangqi_agent.vision.templates import PieceTemplateBank
@@ -42,6 +50,9 @@ class LegalMoveDiffObserver:
         max_semantic_distance: float = 0.18,
         min_semantic_margin: float = 0.02,
         min_evidence_score: float = 0.8,
+        max_instance_distance: float = 0.35,
+        min_instance_evidence_score: float = 0.4,
+        feature_extractor: EndpointFeatureExtractor | None = None,
     ) -> None:
         if isinstance(patch_size, bool) or not isinstance(patch_size, int) or patch_size <= 0:
             raise ValueError("patch_size must be a positive integer")
@@ -52,19 +63,37 @@ class LegalMoveDiffObserver:
             min_margin,
             max_semantic_distance,
             min_semantic_margin,
+            max_instance_distance,
         )
         if any(not isfinite(value) or value <= 0 for value in thresholds):
             raise ValueError("observer thresholds must be finite and positive")
         if not isfinite(min_evidence_score) or not 0 < min_evidence_score <= 1:
             raise ValueError("min_evidence_score must be finite and between zero and one")
+        if (
+            not isfinite(min_instance_evidence_score)
+            or not 0 < min_instance_evidence_score <= 1
+        ):
+            raise ValueError(
+                "min_instance_evidence_score must be finite and between zero and one"
+            )
         self._patch_size = patch_size
         self._min_local_difference = min_local_difference
         self._max_unexpected_difference = max_unexpected_difference
         self._min_score = min_score
         self._min_margin = min_margin
-        self._max_semantic_distance = max_semantic_distance
-        self._min_semantic_margin = min_semantic_margin
         self._min_evidence_score = min_evidence_score
+        self._feature_extractor = feature_extractor or InstanceTransferExtractor()
+        self._semantic_gate = MoveSemanticGate(
+            SemanticThresholds(
+                max_source_empty_distance=max_semantic_distance,
+                min_source_empty_evidence_score=min_evidence_score,
+                max_destination_side_distance=max_semantic_distance,
+                min_destination_side_evidence_score=min_evidence_score,
+                max_instance_distance=max_instance_distance,
+                min_instance_evidence_score=min_instance_evidence_score,
+                min_semantic_margin=min_semantic_margin,
+            )
+        )
 
     def observe(
         self,
@@ -105,9 +134,8 @@ class LegalMoveDiffObserver:
         best = candidates[0]
         next_score = candidates[1].score if len(candidates) > 1 else 0.0
         margin = best.score - next_score
-        semantic_distance = max(
-            best.source_expected_distance,
-            best.destination_expected_distance,
+        endpoint_features = self._feature_extractor.extract(
+            _endpoint_crops(best.move, before_patches, after_patches)
         )
         visual_confidence = min(
             1.0,
@@ -123,27 +151,35 @@ class LegalMoveDiffObserver:
             best.destination_semantic_evidence_score,
         )
         evidence_score = min(visual_confidence, semantic_evidence_score)
-        rejection_reasons = _rejection_reasons(
-            best,
-            margin=margin,
-            semantic_distance=semantic_distance,
-            evidence_score=evidence_score,
-            min_local_difference=self._min_local_difference,
-            max_unexpected_difference=self._max_unexpected_difference,
-            min_score=self._min_score,
-            min_margin=self._min_margin,
-            max_semantic_distance=self._max_semantic_distance,
-            min_semantic_margin=self._min_semantic_margin,
-            min_evidence_score=self._min_evidence_score,
+        rejection_reasons = list(
+            _visual_rejection_reasons(
+                best,
+                margin=margin,
+                min_local_difference=self._min_local_difference,
+                max_unexpected_difference=self._max_unexpected_difference,
+                min_score=self._min_score,
+                min_margin=self._min_margin,
+            )
         )
+        rejection_reasons.extend(
+            self._semantic_gate.evaluate(best, endpoint_features).rejection_reasons
+        )
+        evidence_score = min(evidence_score, endpoint_features.instance_evidence_score)
+        if evidence_score < self._min_evidence_score:
+            rejection_reasons.append("evidence_score")
         if rejection_reasons:
-            return _ambiguous(candidates, local, rejection_reasons)
+            return _ambiguous(
+                candidates,
+                local,
+                tuple(dict.fromkeys(rejection_reasons)),
+                endpoint_features,
+            )
 
         return MoveProposal(
             status=ObservationStatus.ACCEPTED,
             move=best.move,
             evidence_score=evidence_score,
-            evidence=MoveEvidence(candidates, local, ()),
+            evidence=MoveEvidence(candidates, local, (), endpoint_features),
         )
 
 
@@ -202,28 +238,29 @@ def _ambiguous(
     candidates: tuple[CandidateEvidence, ...],
     local: tuple[float, ...],
     rejection_reasons: tuple[str, ...],
+    endpoint_features: EndpointFeatures | None = None,
 ) -> MoveProposal:
     return MoveProposal(
         status=ObservationStatus.AMBIGUOUS,
         move=None,
         evidence_score=0.0,
-        evidence=MoveEvidence(candidates, local, rejection_reasons),
+        evidence=MoveEvidence(
+            candidates,
+            local,
+            rejection_reasons,
+            endpoint_features,
+        ),
     )
 
 
-def _rejection_reasons(
+def _visual_rejection_reasons(
     best: CandidateEvidence,
     *,
     margin: float,
-    semantic_distance: float,
-    evidence_score: float,
     min_local_difference: float,
     max_unexpected_difference: float,
     min_score: float,
     min_margin: float,
-    max_semantic_distance: float,
-    min_semantic_margin: float,
-    min_evidence_score: float,
 ) -> tuple[str, ...]:
     reasons: list[str] = []
     if best.source_difference < min_local_difference:
@@ -236,10 +273,24 @@ def _rejection_reasons(
         reasons.append("candidate_score")
     if margin < min_margin:
         reasons.append("candidate_margin")
-    if semantic_distance > max_semantic_distance:
-        reasons.append("semantic_distance")
-    if best.semantic_margin < min_semantic_margin:
-        reasons.append("semantic_margin")
-    if evidence_score < min_evidence_score:
-        reasons.append("evidence_score")
     return tuple(reasons)
+
+
+def _endpoint_crops(
+    move: Move,
+    before_patches: tuple[NDArray[np.uint8], ...],
+    after_patches: tuple[NDArray[np.uint8], ...],
+) -> EndpointCrops:
+    return EndpointCrops(
+        source_before=_feature_patch(before_patches[move.from_index]),
+        source_after=_feature_patch(after_patches[move.from_index]),
+        target_before=_feature_patch(before_patches[move.to_index]),
+        target_after=_feature_patch(after_patches[move.to_index]),
+    )
+
+
+def _feature_patch(patch: NDArray[np.uint8]) -> NDArray[np.uint8]:
+    if patch.shape == (48, 48, 4):
+        return np.array(patch, dtype=np.uint8, copy=True)
+    resized = cv2.resize(patch, (48, 48), interpolation=cv2.INTER_LINEAR)
+    return np.asarray(resized, dtype=np.uint8)
