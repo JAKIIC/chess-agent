@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import replace
 from typing import Protocol
 
 from PySide6.QtCore import QObject, Signal
@@ -21,8 +22,13 @@ from xiangqi_agent.capture.monitor import (
 )
 from xiangqi_agent.capture.protocol import FrameSource
 from xiangqi_agent.capture.windows_capture_source import WindowsCaptureSource
-from xiangqi_agent.domain.board import Orientation
+from xiangqi_agent.domain.board import BoardState, Orientation
 from xiangqi_agent.platform.windows import WindowInfo, WindowsWindowCatalog
+from xiangqi_agent.sync.live_session import (
+    LiveSyncSession,
+    LiveSyncStatus,
+    LiveSyncUpdate,
+)
 from xiangqi_agent.vision.geometry import GeometryError, parse_normalized_quad
 
 DEFAULT_QUAD = "0.315,0.132;0.678,0.132;0.678,0.862;0.315,0.862"
@@ -33,6 +39,7 @@ class WindowCatalog(Protocol):
 
 
 type SourceFactory = Callable[[WindowInfo], FrameSource]
+type BoardProvider = Callable[[], BoardState]
 
 
 class _CaptureBridge(QObject):
@@ -42,18 +49,25 @@ class _CaptureBridge(QObject):
 class CapturePanel(QWidget):
     """Connect a user-selected visible window to fixed manual board geometry."""
 
+    sync_update = Signal(object)
+
     def __init__(
         self,
         *,
         catalog: WindowCatalog | None = None,
         source_factory: SourceFactory | None = None,
+        board_provider: BoardProvider | None = None,
+        patch_size: int = 48,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self._catalog = catalog or WindowsWindowCatalog()
         self._source_factory = source_factory or _default_source_factory
+        self._board_provider = board_provider
+        self._patch_size = patch_size
         self._windows: tuple[WindowInfo, ...] = ()
         self._monitor: CaptureMonitor | None = None
+        self._session: LiveSyncSession | None = None
         self._bridge = _CaptureBridge(self)
         self._bridge.update.connect(self._show_update)
 
@@ -87,15 +101,33 @@ class CapturePanel(QWidget):
 
     def close_capture(self) -> None:
         monitor = self._monitor
+        session = self._session
         self._monitor = None
+        self._session = None
         if monitor is not None:
             monitor.close()
+        if session is not None:
+            session.close()
         self.connect_button.setText("连接")
         self.window_combo.setEnabled(True)
         self.refresh_button.setEnabled(True)
         self.quad_input.setEnabled(True)
         self.orientation_combo.setEnabled(True)
         self.connect_button.setEnabled(bool(self._windows))
+
+    def set_board_provider(self, provider: BoardProvider) -> None:
+        self._board_provider = provider
+
+    def recover(self, board: BoardState) -> None:
+        session = self._session
+        if session is None:
+            return
+        try:
+            orientation = Orientation(str(self.orientation_combo.currentData()))
+            quad = parse_normalized_quad(self.quad_input.text().strip())
+            session.recover(replace(board, orientation=orientation), quad=quad)
+        except (GeometryError, RuntimeError, TypeError, ValueError) as exc:
+            self.status_label.setText(f"同步恢复失败：{exc}")
 
     def _refresh_windows(self) -> None:
         self.close_capture()
@@ -124,7 +156,7 @@ class CapturePanel(QWidget):
         self.status_label.setText(f"找到 {len(self._windows)} 个候选窗口，请确认后连接")
 
     def _toggle_capture(self) -> None:
-        if self._monitor is not None:
+        if self._monitor is not None or self._session is not None:
             self.close_capture()
             self.status_label.setText("已断开窗口捕获")
             return
@@ -140,20 +172,40 @@ class CapturePanel(QWidget):
             self.status_label.setText(f"四角标定无效：{exc}")
             return
 
-        self._monitor = CaptureMonitor(
-            source,
-            quad,
-            orientation=orientation,
-            on_update=self._bridge.update.emit,
-        )
+        if self._board_provider is None:
+            self._monitor = CaptureMonitor(
+                source,
+                quad,
+                orientation=orientation,
+                on_update=self._bridge.update.emit,
+            )
+        else:
+            try:
+                board = replace(self._board_provider(), orientation=orientation)
+            except (RuntimeError, TypeError, ValueError) as exc:
+                self.status_label.setText(f"当前局面无效：{exc}")
+                return
+            self._session = LiveSyncSession(
+                source,
+                board,
+                quad,
+                on_update=self._bridge.update.emit,
+                patch_size=self._patch_size,
+            )
         self.connect_button.setText("断开")
         self.window_combo.setEnabled(False)
         self.refresh_button.setEnabled(False)
         self.quad_input.setEnabled(False)
         self.orientation_combo.setEnabled(False)
-        self._monitor.start()
+        if self._session is not None:
+            self._session.start()
+        elif self._monitor is not None:
+            self._monitor.start()
 
-    def _show_update(self, update: CaptureMonitorUpdate) -> None:
+    def _show_update(self, update: CaptureMonitorUpdate | LiveSyncUpdate) -> None:
+        if isinstance(update, LiveSyncUpdate):
+            self._show_live_update(update)
+            return
         if update.status is MonitorStatus.CONNECTING:
             self.status_label.setText("正在连接，等待第一帧…")
         elif update.status is MonitorStatus.WATCHING:
@@ -176,9 +228,45 @@ class CapturePanel(QWidget):
             self.status_label.setText(f"捕获失败：{update.message}")
             self.close_capture()
 
+    def _show_live_update(self, update: LiveSyncUpdate) -> None:
+        self.sync_update.emit(update)
+        width, height = update.frame_size or (0, 0)
+        if update.status is LiveSyncStatus.CONNECTING:
+            self.status_label.setText("正在连接，等待稳定棋盘画面…")
+        elif update.status is LiveSyncStatus.BASELINE_READY:
+            self.status_label.setText(
+                f"实时同步已启动：{width}×{height}，{update.point_count} 个交点"
+            )
+        elif update.status is LiveSyncStatus.WATCHING:
+            self.status_label.setText("正在监听已确认局面")
+        elif update.status is LiveSyncStatus.WAITING_FOR_STABLE:
+            self.status_label.setText("检测到画面变化，正在等待落子动画结束…")
+        elif update.status is LiveSyncStatus.WAITING_FOR_ENDPOINT:
+            self.status_label.setText("已看到棋子点选，正在等待完成走棋…")
+        elif update.status is LiveSyncStatus.MOVE_ACCEPTED:
+            move = update.move.uci if update.move is not None else "未知"
+            self.status_label.setText(f"已同步一步：{move}")
+        elif update.status is LiveSyncStatus.GEOMETRY_REBOUND:
+            self.status_label.setText(
+                f"窗口缩放后已安全适配：{width}×{height}，{update.point_count} 个交点"
+            )
+        elif update.status is LiveSyncStatus.PAUSED_AMBIGUOUS:
+            self.status_label.setText("变化无法唯一确认；已保留最后局面，请用 FEN 明确恢复")
+        elif update.status in (
+            LiveSyncStatus.CONTEXT_INVALID,
+            LiveSyncStatus.MANUAL_RECOVERY_REQUIRED,
+        ):
+            self.status_label.setText("窗口或标定已变化；请确认 FEN 并重新标定后恢复")
+        elif update.status is LiveSyncStatus.CLOSED:
+            self.status_label.setText("目标窗口已关闭，请重新刷新选择")
+            self.close_capture()
+        else:
+            self.status_label.setText(f"实时同步失败：{update.message}")
+            self.close_capture()
+
 
 def _default_source_factory(window: WindowInfo) -> FrameSource:
-    return WindowsCaptureSource(window, fps=2)
+    return WindowsCaptureSource(window, fps=20)
 
 
 def _window_label(window: WindowInfo) -> str:

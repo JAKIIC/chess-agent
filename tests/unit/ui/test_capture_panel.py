@@ -4,8 +4,17 @@ import numpy as np
 from PySide6.QtCore import Qt
 
 from xiangqi_agent.capture.fake import FakeFrameSource
+from xiangqi_agent.domain.board import BoardState
+from xiangqi_agent.domain.fen import parse_fen
+from xiangqi_agent.domain.rules import apply_move, legal_moves
 from xiangqi_agent.platform.windows import WindowInfo
+from xiangqi_agent.sync.live_session import LiveSyncStatus
 from xiangqi_agent.ui.capture_panel import CapturePanel
+
+START = "rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w"
+CELL = 24
+PALETTE = {symbol: index * 15 for index, symbol in enumerate(".KABNRCPkabnrcp", start=1)}
+TEST_QUAD = "0.0558,0.0502;0.9488,0.0502;0.9488,0.9540;0.0558,0.9540"
 
 
 class FakeCatalog:
@@ -14,6 +23,19 @@ class FakeCatalog:
 
     def list_candidates(self) -> tuple[WindowInfo, ...]:
         return self.windows
+
+
+def _render(board: BoardState) -> np.ndarray:
+    frame = np.zeros((240, 216, 4), dtype=np.uint8)
+    frame[..., 3] = 255
+    for index, symbol in enumerate(board.pieces):
+        row, column = divmod(index, 9)
+        frame[
+            row * CELL : (row + 1) * CELL,
+            column * CELL : (column + 1) * CELL,
+            :3,
+        ] = PALETTE[symbol]
+    return frame
 
 
 def test_capture_panel_selects_window_and_reports_ninety_points(qtbot: object) -> None:
@@ -75,3 +97,45 @@ def test_capture_panel_prefers_the_explicit_tiantian_xiangqi_title(qtbot: object
     panel.refresh_button.click()
 
     assert "天天象棋" in panel.window_combo.currentText()
+
+
+def test_capture_panel_emits_rule_confirmed_board_updates(qtbot: object) -> None:
+    board = parse_fen(START)
+    move = next(move for move in legal_moves(board) if move.uci == "h2e2")
+    after = apply_move(board, move)
+    target = WindowInfo(42, "天天象棋", "WeChatAppEx.exe", (216, 240))
+    source = FakeFrameSource(target.hwnd)
+    panel = CapturePanel(
+        catalog=FakeCatalog((target,)),
+        source_factory=lambda _: source,
+        board_provider=lambda: board,
+        patch_size=CELL,
+    )
+    updates = []
+    panel.sync_update.connect(updates.append)
+    qtbot.addWidget(panel)  # type: ignore[attr-defined]
+
+    panel.refresh_button.click()
+    panel.quad_input.setText(TEST_QUAD)
+    panel.connect_button.click()
+    baseline = _render(board)
+    source.push(baseline, 0)
+    source.push(baseline.copy(), 50_000_000)
+    source.push(baseline.copy(), 100_000_000)
+    qtbot.waitUntil(  # type: ignore[attr-defined]
+        lambda: any(update.status is LiveSyncStatus.BASELINE_READY for update in updates),
+        timeout=2000,
+    )
+
+    moved = _render(after)
+    source.push(moved, 150_000_000)
+    source.push(moved.copy(), 260_000_000)
+    qtbot.waitUntil(  # type: ignore[attr-defined]
+        lambda: any(update.status is LiveSyncStatus.MOVE_ACCEPTED for update in updates),
+        timeout=2000,
+    )
+
+    accepted = next(update for update in updates if update.status is LiveSyncStatus.MOVE_ACCEPTED)
+    assert accepted.board == after
+    assert "已同步" in panel.status_label.text()
+    panel.close_capture()

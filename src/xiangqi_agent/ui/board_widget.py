@@ -4,7 +4,7 @@ from PySide6.QtCore import QPointF, QRectF, QSize, Qt
 from PySide6.QtGui import QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import QWidget
 
-from xiangqi_agent.domain.board import BoardState, Orientation
+from xiangqi_agent.domain.board import BoardState, Move, Orientation
 
 _PIECE_NAMES = {
     "K": "帅",
@@ -28,14 +28,20 @@ class BoardWidget(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._board: BoardState | None = None
+        self._last_move: Move | None = None
         self.setMinimumSize(430, 520)
 
     @property
     def board(self) -> BoardState | None:
         return self._board
 
-    def set_board(self, board: BoardState) -> None:
+    @property
+    def last_move(self) -> Move | None:
+        return self._last_move
+
+    def set_board(self, board: BoardState, *, last_move: Move | None = None) -> None:
         self._board = board
+        self._last_move = last_move
         self.update()
 
     def sizeHint(self) -> QSize:
@@ -85,6 +91,19 @@ class BoardWidget(QWidget):
 
         if self._board is None:
             return
+        if self._last_move is not None:
+            highlight_radius = min(dx, dy) * 0.48
+            painter.setPen(QPen(Qt.PenStyle.NoPen))
+            painter.setBrush(QColor(244, 197, 66, 150))
+            for index in (self._last_move.from_index, self._last_move.to_index):
+                row, column = divmod(index, 9)
+                if self._board.orientation == Orientation.BLACK_BOTTOM:
+                    row, column = 9 - row, 8 - column
+                painter.drawEllipse(
+                    QPointF(margin + column * dx, margin + row * dy),
+                    highlight_radius,
+                    highlight_radius,
+                )
         radius = min(dx, dy) * 0.39
         piece_font = QFont("Microsoft YaHei", max(13, round(radius * 0.88)), QFont.Weight.Bold)
         painter.setFont(piece_font)

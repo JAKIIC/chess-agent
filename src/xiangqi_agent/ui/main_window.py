@@ -28,14 +28,15 @@ from xiangqi_agent.coach.evidence import build_evidence
 from xiangqi_agent.coach.service import CoachExplainer, CoachService
 from xiangqi_agent.config import SecretStore
 from xiangqi_agent.domain.analysis import EngineAnalysis
-from xiangqi_agent.domain.board import BoardState
+from xiangqi_agent.domain.board import BoardState, Move
 from xiangqi_agent.domain.coach import CoachEvidence, CoachExplanation
 from xiangqi_agent.domain.fen import parse_fen
-from xiangqi_agent.domain.notation import resolve_move_reference
+from xiangqi_agent.domain.notation import resolve_move_reference, to_chinese
 from xiangqi_agent.domain.rules import legal_moves
 from xiangqi_agent.engine.installer import load_installed_pikafish
 from xiangqi_agent.engine.process import PikafishProcess
 from xiangqi_agent.engine.service import AnalysisEngine, AnalysisService
+from xiangqi_agent.sync.live_session import LiveSyncStatus, LiveSyncUpdate
 from xiangqi_agent.ui.analysis_view_model import analysis_rows
 from xiangqi_agent.ui.board_widget import BoardWidget
 from xiangqi_agent.ui.capture_panel import CapturePanel
@@ -85,6 +86,8 @@ class MainWindow(QMainWindow):
 
         self.board_widget = BoardWidget()
         self.capture_panel = capture_panel or CapturePanel()
+        self.capture_panel.set_board_provider(self._capture_board)
+        self.capture_panel.sync_update.connect(self._on_sync_update)
         self.fen_input = QLineEdit(START_FEN)
         self.fen_input.setPlaceholderText("输入标准中国象棋 FEN")
         self.analyse_button = QPushButton("载入局面并分析")
@@ -223,15 +226,47 @@ class MainWindow(QMainWindow):
         except ValueError as exc:
             self.phase_label.setText(f"FEN 无效：{exc}")
             return
+        self._adopt_board(board, "正在进行快速分析…")
+        self.capture_panel.recover(board)
+
+    def _adopt_board(
+        self,
+        board: BoardState,
+        phase: str,
+        *,
+        last_move: Move | None = None,
+    ) -> None:
         self._board = board
         self._latest_analysis = None
         self._active_evidence = None
         self._coach_service.clear()
         self.coach_panel.clear_explanation("等待当前局面的引擎证据")
-        self.board_widget.set_board(board)
+        self.fen_input.setText(board.fen)
+        self.board_widget.set_board(board, last_move=last_move)
         self.results.setRowCount(0)
-        self.phase_label.setText("正在进行快速分析…")
+        if self._service is None:
+            self.phase_label.setText(f"{phase}；Pikafish 未安装")
+            return
+        self.phase_label.setText(phase)
         self._service.submit(board)
+
+    def _capture_board(self) -> BoardState:
+        if self._board is None:
+            raise RuntimeError("current board is not ready")
+        return self._board
+
+    def _on_sync_update(self, update: LiveSyncUpdate) -> None:
+        if update.status is not LiveSyncStatus.MOVE_ACCEPTED or update.move is None:
+            return
+        before = self._board
+        if before is None or update.board.position_id == before.position_id:
+            return
+        notation = to_chinese(before, update.move)
+        self._adopt_board(
+            update.board,
+            f"已同步 {notation} · 正在进行快速分析…",
+            last_move=update.move,
+        )
 
     def _show_quick(self, analysis: EngineAnalysis) -> None:
         if not self._is_current(analysis):
