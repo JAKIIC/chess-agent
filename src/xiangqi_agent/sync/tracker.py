@@ -204,11 +204,22 @@ class StableMoveTracker:
         self,
         board: BoardState,
         frame: NDArray[np.generic],
+        *,
+        geometry: BoardGeometry | None = None,
     ) -> TrackingUpdate:
         if not isinstance(board, BoardState):
             raise TypeError("recovery board must be a BoardState")
         current = _owned_frame(frame)
+        recovered_geometry = geometry or self._geometry
+        if not isinstance(recovered_geometry, BoardGeometry):
+            raise TypeError("recovery geometry must be a BoardGeometry")
+        frame_size = (int(current.shape[1]), int(current.shape[0]))
+        if recovered_geometry.frame_size != frame_size:
+            raise ValueError("recovery geometry frame size must match the recovery frame")
+        if recovered_geometry.orientation is not board.orientation:
+            raise ValueError("recovery geometry orientation must match the recovery board")
         self._board = board
+        self._geometry = recovered_geometry
         self._confirmed_frame = current.copy()
         self._previous_frame = current
         self._motion_seen = False

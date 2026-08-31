@@ -33,7 +33,8 @@ def test_capture_panel_selects_window_and_reports_ninety_points(qtbot: object) -
     assert panel.connect_button.text() == "断开"
 
     source.push(np.zeros((300, 450, 4), dtype=np.uint8), timestamp_ns=2)
-    qtbot.waitUntil(lambda: "自动适配" in panel.status_label.text(), timeout=1000)  # type: ignore[attr-defined]
+    qtbot.waitUntil(lambda: "几何已自动适配" in panel.status_label.text(), timeout=1000)  # type: ignore[attr-defined]
+    assert "同步尚未确认" in panel.status_label.text()
 
     source.push(np.zeros((200, 450, 4), dtype=np.uint8), timestamp_ns=3)
     qtbot.waitUntil(lambda: "重新标定" in panel.status_label.text(), timeout=1000)  # type: ignore[attr-defined]

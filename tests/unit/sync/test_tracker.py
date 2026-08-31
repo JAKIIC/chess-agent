@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 
 from xiangqi_agent.domain.board import BoardState
 from xiangqi_agent.domain.fen import parse_fen
@@ -263,3 +264,47 @@ def test_tracker_rejects_resize_when_the_position_changed_at_the_same_time() -> 
     assert invalid.board == board
     assert tracker.board == board
     assert tracker.geometry.frame_size == (216, 240)
+
+
+def test_manual_recovery_after_rejected_resize_rebinds_geometry_and_resumes() -> None:
+    board = parse_fen(START)
+    first_move = _move(board, "h2e2")
+    recovered_board = apply_move(board, first_move)
+    resized_recovery_frame = _scale_two_times(_render(recovered_board))
+    tracker = _tracker(board)
+    tracker.initialize(_render(board))
+    tracker.rebind_frame_size(resized_recovery_frame)
+    recovered_geometry = _geometry().rebind((432, 480))
+
+    recovered = tracker.recover(
+        recovered_board,
+        resized_recovery_frame,
+        geometry=recovered_geometry,
+    )
+
+    assert recovered.status is TrackingStatus.WATCHING
+    assert tracker.geometry == recovered_geometry
+    second_move = _move(recovered_board, "h7e7")
+    resized_after = _scale_two_times(_render(apply_move(recovered_board, second_move)))
+    tracker.push(resized_after)
+    tracker.push(resized_after.copy())
+    accepted = tracker.push(resized_after.copy())
+
+    assert accepted.status is TrackingStatus.ACCEPTED
+    assert accepted.move == second_move
+
+
+def test_manual_recovery_rejects_geometry_that_does_not_match_the_frame() -> None:
+    board = parse_fen(START)
+    tracker = _tracker(board)
+    tracker.initialize(_render(board))
+    tracker.invalidate_context()
+
+    with pytest.raises(ValueError, match="frame size"):
+        tracker.recover(
+            board,
+            _scale_two_times(_render(board)),
+            geometry=_geometry(),
+        )
+
+    assert tracker.push(_render(board)).status is TrackingStatus.CONTEXT_INVALID
