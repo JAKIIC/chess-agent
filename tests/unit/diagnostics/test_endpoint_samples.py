@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
+from datetime import UTC, datetime
 from pathlib import Path
 
 import cv2
@@ -22,12 +23,17 @@ from xiangqi_agent.domain.board import Orientation
 START = "rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w"
 
 
-def _sample(*, sample_id: str = "sample-1", session_id: str = "session-1") -> EndpointSampleV1:
+def _sample(
+    *,
+    sample_id: str = "sample-1",
+    session_id: str = "session-1",
+    created_at_utc: str = "2026-08-30T12:00:00Z",
+) -> EndpointSampleV1:
     return EndpointSampleV1(
         sample_id=sample_id,
         session_id=session_id,
         sample_kind=SampleKind.MOVE,
-        created_at_utc="2026-08-30T12:00:00Z",
+        created_at_utc=created_at_utc,
         confirmed_fen=START,
         confirmed_position_id="132bdaf223100c4bd42ae8b81f0fb96c",
         actual_uci="i0h0",
@@ -144,3 +150,92 @@ def test_delete_all_removes_samples_but_preserves_the_configured_root(tmp_path: 
     assert recorder.delete_all() == 2
     assert tmp_path.exists()
     assert list(tmp_path.iterdir()) == []
+
+
+def test_purge_expired_removes_only_samples_older_than_retention(tmp_path: Path) -> None:
+    recorder = EndpointSampleRecorder(tmp_path, enabled=True, retention_days=7)
+    old = recorder.record(
+        _sample(
+            sample_id="old-sample",
+            created_at_utc="2026-08-01T00:00:00Z",
+        ),
+        _crops(),
+    )
+    fresh = recorder.record(
+        _sample(
+            sample_id="fresh-sample",
+            created_at_utc="2026-08-05T00:00:00Z",
+        ),
+        _crops(),
+    )
+
+    removed = recorder.purge_expired(datetime(2026, 8, 10, tzinfo=UTC))
+
+    assert removed == 1
+    assert not old.exists()
+    assert fresh.exists()
+
+
+@pytest.mark.parametrize("retention_days", [-1, True, 1.5])
+def test_recorder_rejects_invalid_retention_days(
+    tmp_path: Path,
+    retention_days: object,
+) -> None:
+    with pytest.raises(ValueError, match="retention_days"):
+        EndpointSampleRecorder(tmp_path, retention_days=retention_days)
+
+
+def test_purge_expired_rejects_a_naive_clock(tmp_path: Path) -> None:
+    recorder = EndpointSampleRecorder(tmp_path)
+    naive_now = datetime(2026, 8, 10, tzinfo=UTC).replace(tzinfo=None)
+
+    with pytest.raises(ValueError, match="timezone-aware"):
+        recorder.purge_expired(naive_now)
+
+
+def test_record_automatically_purges_samples_older_than_retention(tmp_path: Path) -> None:
+    recorder = EndpointSampleRecorder(tmp_path, enabled=True, retention_days=7)
+    old = recorder.record(
+        _sample(
+            sample_id="old-sample",
+            created_at_utc="2026-08-01T00:00:00Z",
+        ),
+        _crops(),
+    )
+
+    current = recorder.record(
+        _sample(
+            sample_id="current-sample",
+            created_at_utc="2026-08-10T00:00:00Z",
+        ),
+        _crops(),
+    )
+
+    assert not old.exists()
+    assert current.exists()
+
+
+def test_failed_record_does_not_purge_existing_samples(tmp_path: Path) -> None:
+    recorder = EndpointSampleRecorder(tmp_path, enabled=True, retention_days=7)
+    old = recorder.record(
+        _sample(
+            sample_id="old-sample",
+            created_at_utc="2026-08-01T00:00:00Z",
+        ),
+        _crops(),
+    )
+    invalid_crops = replace(
+        _crops(),
+        target_after=np.zeros((480, 640, 4), dtype=np.uint8),
+    )
+
+    with pytest.raises(ValueError, match="48x48"):
+        recorder.record(
+            _sample(
+                sample_id="invalid-sample",
+                created_at_utc="2026-08-10T00:00:00Z",
+            ),
+            invalid_crops,
+        )
+
+    assert old.exists()

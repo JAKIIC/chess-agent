@@ -4,6 +4,7 @@ import json
 import re
 import shutil
 from dataclasses import asdict, dataclass
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from hashlib import sha256
 from pathlib import Path
@@ -19,6 +20,7 @@ from xiangqi_agent.domain.board import Orientation, Side
 
 _CROP_SIZE = 48
 _DEFAULT_MAX_BYTES = 256 * 1024 * 1024
+_DEFAULT_RETENTION_DAYS = 7
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _UCI = re.compile(r"^[a-i][0-9][a-i][0-9]$")
 _CROP_NAMES = (
@@ -114,14 +116,22 @@ class EndpointSampleRecorder:
         *,
         enabled: bool = False,
         max_bytes: int = _DEFAULT_MAX_BYTES,
+        retention_days: int = _DEFAULT_RETENTION_DAYS,
     ) -> None:
         if not isinstance(root, Path):
             raise TypeError("sample root must be a Path")
         if isinstance(max_bytes, bool) or not isinstance(max_bytes, int) or max_bytes <= 0:
             raise ValueError("max_bytes must be a positive integer")
+        if (
+            isinstance(retention_days, bool)
+            or not isinstance(retention_days, int)
+            or retention_days < 0
+        ):
+            raise ValueError("retention_days must be a non-negative integer")
         self._root = root
         self._enabled = enabled
         self._max_bytes = max_bytes
+        self._retention_days = retention_days
 
     def record(self, sample: EndpointSampleV1, crops: EndpointCrops) -> Path:
         if not self._enabled:
@@ -130,6 +140,9 @@ class EndpointSampleRecorder:
             raise TypeError("sample must be an EndpointSampleV1")
         if not isinstance(crops, EndpointCrops):
             raise TypeError("crops must be EndpointCrops")
+        sample_time = datetime.fromisoformat(
+            f"{sample.created_at_utc[:-1]}+00:00"
+        ).astimezone(UTC)
 
         encoded = _encode_crops(crops)
         crop_hashes = {
@@ -142,6 +155,7 @@ class EndpointSampleRecorder:
             indent=2,
             sort_keys=True,
         ).encode("utf-8")
+        self.purge_expired(sample_time)
         added_bytes = len(manifest_bytes) + sum(len(contents) for contents in encoded.values())
         if _tree_size(self._root) + added_bytes > self._max_bytes:
             raise SampleQuotaExceededError("endpoint sample capacity would be exceeded")
@@ -180,6 +194,23 @@ class EndpointSampleRecorder:
         removed = 0
         for session_dir in tuple(path for path in self._root.iterdir() if path.is_dir()):
             removed += _delete_sample_directories(session_dir)
+            if session_dir.exists() and not any(session_dir.iterdir()):
+                session_dir.rmdir()
+        return removed
+
+    def purge_expired(self, now: datetime) -> int:
+        if not isinstance(now, datetime) or now.tzinfo is None or now.utcoffset() is None:
+            raise ValueError("purge clock must be a timezone-aware datetime")
+        cutoff = now.astimezone(UTC) - timedelta(days=self._retention_days)
+        if not self._root.exists():
+            return 0
+        removed = 0
+        for session_dir in tuple(path for path in self._root.iterdir() if path.is_dir()):
+            for sample_dir in tuple(path for path in session_dir.iterdir() if path.is_dir()):
+                created_at = _sample_created_at(sample_dir)
+                if created_at is not None and created_at < cutoff:
+                    shutil.rmtree(sample_dir)
+                    removed += 1
             if session_dir.exists() and not any(session_dir.iterdir()):
                 session_dir.rmdir()
         return removed
@@ -233,3 +264,18 @@ def _delete_sample_directories(session_dir: Path) -> int:
     for sample_dir in samples:
         shutil.rmtree(sample_dir)
     return len(samples)
+
+
+def _sample_created_at(sample_dir: Path) -> datetime | None:
+    manifest_path = sample_dir / "manifest.json"
+    if not manifest_path.is_file():
+        return None
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+        value = payload["created_at_utc"]
+        if not isinstance(value, str) or not value.endswith("Z"):
+            return None
+        parsed = datetime.fromisoformat(f"{value[:-1]}+00:00")
+    except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError):
+        return None
+    return parsed.astimezone(UTC)
