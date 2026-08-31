@@ -35,11 +35,11 @@ from xiangqi_agent.domain.notation import resolve_move_reference, to_chinese
 from xiangqi_agent.domain.rules import legal_moves
 from xiangqi_agent.engine.installer import load_installed_pikafish
 from xiangqi_agent.engine.process import PikafishProcess
-from xiangqi_agent.engine.service import AnalysisEngine, AnalysisService
+from xiangqi_agent.engine.service import AnalysisEngine, AnalysisFailure, AnalysisService
 from xiangqi_agent.sync.live_session import LiveSyncStatus, LiveSyncUpdate
 from xiangqi_agent.ui.analysis_view_model import analysis_rows
 from xiangqi_agent.ui.board_widget import BoardWidget
-from xiangqi_agent.ui.capture_panel import CapturePanel
+from xiangqi_agent.ui.capture_panel import CapturePanel, CaptureRecoveryStatus
 from xiangqi_agent.ui.coach_panel import CoachPanel
 from xiangqi_agent.ui.fonts import ensure_cjk_font
 from xiangqi_agent.ui.settings_dialog import DeepSeekSettingsDialog
@@ -50,7 +50,7 @@ START_FEN = "rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w"
 class _AnalysisBridge(QObject):
     quick = Signal(object)
     deep = Signal(object)
-    failed = Signal(str)
+    failed = Signal(object)
     coach_ready = Signal(object)
     coach_failed = Signal(str)
 
@@ -65,6 +65,7 @@ class MainWindow(QMainWindow):
         runtime_root: Path | None = None,
         quick_ms: int = 500,
         deep_ms: int = 3000,
+        enable_live_analysis: bool = False,
     ) -> None:
         super().__init__()
         application = QApplication.instance()
@@ -74,7 +75,11 @@ class MainWindow(QMainWindow):
         self.resize(1180, 760)
         self._board: BoardState | None = None
         self._latest_analysis: EngineAnalysis | None = None
+        self._analysis_generation: int | None = None
         self._active_evidence: CoachEvidence | None = None
+        self._pending_manual_board: BoardState | None = None
+        self._pending_recovery_id: int | None = None
+        self._enable_live_analysis = enable_live_analysis
         self._secret_store = SecretStore()
         self._bridge = _AnalysisBridge(self)
         self._bridge.quick.connect(self._show_quick)
@@ -88,6 +93,7 @@ class MainWindow(QMainWindow):
         self.capture_panel = capture_panel or CapturePanel()
         self.capture_panel.set_board_provider(self._capture_board)
         self.capture_panel.sync_update.connect(self._on_sync_update)
+        self.capture_panel.session_reset.connect(self._on_capture_reset)
         self.fen_input = QLineEdit(START_FEN)
         self.fen_input.setPlaceholderText("输入标准中国象棋 FEN")
         self.analyse_button = QPushButton("载入局面并分析")
@@ -124,9 +130,7 @@ class MainWindow(QMainWindow):
             on_error=self._bridge.coach_failed.emit,
         )
         resolved_engine = engine or self._load_default_engine(runtime_root or Path.cwd())
-        if resolved_engine is None:
-            self.analyse_button.setEnabled(False)
-        else:
+        if resolved_engine is not None:
             self._service = AnalysisService(
                 resolved_engine,
                 quick_ms=quick_ms,
@@ -218,16 +222,27 @@ class MainWindow(QMainWindow):
         )
 
     def _analyse_fen(self) -> None:
-        if self._service is None:
-            return
         try:
             board = parse_fen(self.fen_input.text().strip())
             legal_moves(board)
         except ValueError as exc:
             self.phase_label.setText(f"FEN 无效：{exc}")
             return
-        self._adopt_board(board, "正在进行快速分析…")
-        self.capture_panel.recover(board)
+        recovery = self.capture_panel.recover(board)
+        if recovery.status is CaptureRecoveryStatus.FAILED:
+            self._pending_manual_board = None
+            self._pending_recovery_id = None
+            self.phase_label.setText(recovery.message)
+            return
+        recovered_board = recovery.board or board
+        if recovery.status is CaptureRecoveryStatus.PENDING:
+            self._pending_manual_board = recovered_board
+            self._pending_recovery_id = recovery.recovery_id
+            self.phase_label.setText("等待新的稳定画面确认手工 FEN…")
+            return
+        self._pending_manual_board = None
+        self._pending_recovery_id = None
+        self._adopt_board(recovered_board, "正在进行快速分析…")
 
     def _adopt_board(
         self,
@@ -235,9 +250,11 @@ class MainWindow(QMainWindow):
         phase: str,
         *,
         last_move: Move | None = None,
+        submit_analysis: bool = True,
     ) -> None:
         self._board = board
         self._latest_analysis = None
+        self._analysis_generation = None
         self._active_evidence = None
         self._coach_service.clear()
         self.coach_panel.clear_explanation("等待当前局面的引擎证据")
@@ -248,7 +265,8 @@ class MainWindow(QMainWindow):
             self.phase_label.setText(f"{phase}；Pikafish 未安装")
             return
         self.phase_label.setText(phase)
-        self._service.submit(board)
+        if submit_analysis:
+            self._analysis_generation = self._service.submit(board)
 
     def _capture_board(self) -> BoardState:
         if self._board is None:
@@ -256,17 +274,61 @@ class MainWindow(QMainWindow):
         return self._board
 
     def _on_sync_update(self, update: LiveSyncUpdate) -> None:
+        if update.status in (LiveSyncStatus.ERROR, LiveSyncStatus.CLOSED):
+            if self._pending_manual_board is not None:
+                self._pending_manual_board = None
+                self._pending_recovery_id = None
+                self.phase_label.setText("同步恢复已中断；原局面保持不变")
+            return
+        if update.status is LiveSyncStatus.BASELINE_READY:
+            current = self._board
+            if current is not None and update.board.position_id == current.position_id:
+                self._board = update.board
+                self.fen_input.setText(update.board.fen)
+                self.board_widget.set_board(update.board)
+            return
+        if update.status is LiveSyncStatus.RECOVERY_ACCEPTED:
+            pending = self._pending_manual_board
+            if pending is None or update.recovery_id != self._pending_recovery_id:
+                return
+            if (
+                update.board.position_id != pending.position_id
+                or update.board.orientation is not pending.orientation
+            ):
+                self._pending_manual_board = None
+                self._pending_recovery_id = None
+                self.phase_label.setText("同步恢复结果与待确认 FEN 不一致；已保留原局面")
+                return
+            self._pending_manual_board = None
+            self._pending_recovery_id = None
+            self._adopt_board(update.board, "手工 FEN 已确认，正在进行快速分析…")
+            return
         if update.status is not LiveSyncStatus.MOVE_ACCEPTED or update.move is None:
+            return
+        if self._pending_manual_board is not None:
             return
         before = self._board
         if before is None or update.board.position_id == before.position_id:
             return
+        if update.before_position_id != before.position_id:
+            return
         notation = to_chinese(before, update.move)
+        phase = f"已同步 {notation} · 正在进行快速分析…"
+        if not self._enable_live_analysis:
+            phase = f"已同步 {notation}；实时分析已锁定，等待 Stage C 盲测通过"
         self._adopt_board(
             update.board,
-            f"已同步 {notation} · 正在进行快速分析…",
+            phase,
             last_move=update.move,
+            submit_analysis=self._enable_live_analysis,
         )
+
+    def _on_capture_reset(self) -> None:
+        if self._pending_manual_board is None:
+            return
+        self._pending_manual_board = None
+        self._pending_recovery_id = None
+        self.phase_label.setText("捕获会话已重置；原局面保持不变")
 
     def _show_quick(self, analysis: EngineAnalysis) -> None:
         if not self._is_current(analysis):
@@ -286,8 +348,15 @@ class MainWindow(QMainWindow):
             f"加深分析 · 深度 {analysis.depth} · {analysis.duration_ms} ms"
         )
 
-    def _show_error(self, message: str) -> None:
-        self.phase_label.setText(f"分析暂停：{message}")
+    def _show_error(self, failure: AnalysisFailure) -> None:
+        board = self._board
+        if (
+            board is None
+            or failure.position_id != board.position_id
+            or failure.generation != self._analysis_generation
+        ):
+            return
+        self.phase_label.setText(f"分析暂停：{failure.message}")
 
     def _ask_coach(self, question: str) -> None:
         board = self._board

@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
-from queue import Empty, Queue
-from threading import Lock, Thread, current_thread
+from queue import Empty
+from threading import Condition, Lock, Thread, current_thread
 from time import perf_counter_ns
 
 from xiangqi_agent.capture.adaptive_sampling import (
@@ -31,6 +32,8 @@ class LiveSyncStatus(StrEnum):
     PAUSED_AMBIGUOUS = "paused_ambiguous"
     CONTEXT_INVALID = "context_invalid"
     MANUAL_RECOVERY_REQUIRED = "manual_recovery_required"
+    RECOVERY_PENDING = "recovery_pending"
+    RECOVERY_ACCEPTED = "recovery_accepted"
     CLOSED = "closed"
     ERROR = "error"
 
@@ -42,6 +45,8 @@ class LiveSyncUpdate:
     message: str
     move: Move | None = None
     observation: MoveProposal | None = None
+    before_position_id: str | None = None
+    recovery_id: int | None = None
     frame_size: tuple[int, int] | None = None
     point_count: int = 0
 
@@ -49,6 +54,67 @@ class LiveSyncUpdate:
 @dataclass(frozen=True, slots=True)
 class _Stop:
     pass
+
+
+@dataclass(slots=True)
+class _PendingRecovery:
+    request_id: int
+    board: BoardState
+    quad: NormalizedQuad
+    cutoff_timestamp_ns: int
+    geometry: BoardGeometry
+    detector: FrameStabilityDetector
+
+
+class _CoalescingEventQueue:
+    """Bound full-frame memory while keeping the newest capture evidence."""
+
+    def __init__(self, *, max_frames: int = 3) -> None:
+        if isinstance(max_frames, bool) or not isinstance(max_frames, int) or max_frames <= 0:
+            raise ValueError("max_frames must be a positive integer")
+        self._max_frames = max_frames
+        self._frames: deque[CaptureFrame] = deque()
+        self._terminal: CaptureClosedError | _Stop | None = None
+        self._accepting = True
+        self._condition = Condition()
+
+    @property
+    def pending_frame_count(self) -> int:
+        with self._condition:
+            return len(self._frames)
+
+    def put_frame(self, frame: CaptureFrame) -> None:
+        with self._condition:
+            if not self._accepting:
+                return
+            if len(self._frames) == self._max_frames:
+                self._frames.popleft()
+            self._frames.append(frame)
+            self._condition.notify()
+
+    def put_terminal(self, event: CaptureClosedError | _Stop) -> None:
+        with self._condition:
+            if self._terminal is None:
+                self._terminal = event
+            self._accepting = False
+            self._frames.clear()
+            self._condition.notify_all()
+
+    def clear_frames(self) -> None:
+        with self._condition:
+            self._frames.clear()
+
+    def get(self, *, timeout: float) -> CaptureFrame | CaptureClosedError | _Stop:
+        with self._condition:
+            ready = self._condition.wait_for(
+                lambda: self._terminal is not None or bool(self._frames),
+                timeout=timeout,
+            )
+            if not ready:
+                raise Empty
+            if self._terminal is not None:
+                return self._terminal
+            return self._frames.popleft()
 
 
 class LiveSyncSession:
@@ -76,11 +142,12 @@ class LiveSyncSession:
         self._settle_ms = settle_ms
         self._stable_pairs = stable_pairs
         self._patch_size = patch_size
-        self._events: Queue[CaptureFrame | CaptureClosedError | _Stop] = Queue()
+        self._events = _CoalescingEventQueue(max_frames=3)
         self._lock = Lock()
         self._processing_lock = Lock()
         self._started = False
         self._closed = False
+        self._finalized = False
         self._closed_emitted = False
         self._paused_for_recovery = False
         self._last_status: LiveSyncStatus | None = None
@@ -88,6 +155,8 @@ class LiveSyncSession:
         self._tracker: StableMoveTracker | None = None
         self._sampler: AdaptiveBurstSampler | None = None
         self._latest_frame: CaptureFrame | None = None
+        self._pending_recovery: _PendingRecovery | None = None
+        self._next_recovery_id = 0
 
     @property
     def board(self) -> BoardState:
@@ -103,9 +172,10 @@ class LiveSyncSession:
             self._started = True
         self._emit(LiveSyncStatus.CONNECTING, "waiting for a stable board frame")
         try:
-            self._source.start(self._events.put, self._events.put)
+            self._source.start(self._events.put_frame, self._events.put_terminal)
         except (OSError, RuntimeError, ValueError) as exc:
             self._emit(LiveSyncStatus.ERROR, str(exc))
+            self._finalize("live sync source failed to start")
             return
         worker = Thread(target=self._run, name="xiangqi-live-sync", daemon=True)
         self._thread = worker
@@ -113,49 +183,67 @@ class LiveSyncSession:
 
     def close(self) -> None:
         with self._lock:
-            if self._closed:
+            if self._finalized:
                 return
+            first_request = not self._closed
             self._closed = True
             thread = self._thread
-        self._events.put(_Stop())
-        self._source.close()
-        if thread is not None and thread is not current_thread():
-            thread.join(timeout=2.0)
-        self._emit_closed("live sync session closed")
+        if first_request:
+            self._events.put_terminal(_Stop())
+        try:
+            self._source.close()
+        except (OSError, RuntimeError):
+            pass
+        finally:
+            if thread is not None and thread is not current_thread():
+                thread.join(timeout=2.0)
+            with self._lock:
+                if thread is None or not thread.is_alive():
+                    self._finalized = True
+            self._emit_closed("live sync session closed")
 
     def recover(
         self,
         board: BoardState,
         *,
         quad: NormalizedQuad | None = None,
-    ) -> None:
-        with self._lock:
-            if self._closed:
-                raise RuntimeError("live sync session is closed")
-            tracker = self._tracker
-            sampler = self._sampler
-            latest = self._latest_frame
-            recovered_quad = quad or self._quad
-        if tracker is None or sampler is None or latest is None:
-            raise RuntimeError("live sync baseline is not ready")
-        geometry = BoardGeometry.from_quad(
-            recovered_quad,
-            latest.size,
-            board.orientation,
-        )
+    ) -> int:
         with self._processing_lock:
-            update = tracker.recover(board, latest.bgra, geometry=geometry)
-            sampler.initialize(latest)
-        with self._lock:
-            self._board = update.board
-            self._quad = recovered_quad
-            self._paused_for_recovery = False
-        self._emit_tracking(
-            LiveSyncStatus.WATCHING,
-            "manual board recovery accepted; watching resumed",
-            update,
+            with self._lock:
+                if self._closed:
+                    raise RuntimeError("live sync session is closed")
+                if self._tracker is None or self._sampler is None or self._latest_frame is None:
+                    raise RuntimeError("live sync baseline is not ready")
+                latest = self._latest_frame
+                recovered_quad = quad or self._quad
+                geometry = BoardGeometry.from_quad(
+                    recovered_quad,
+                    latest.size,
+                    board.orientation,
+                )
+                self._next_recovery_id += 1
+                recovery_id = self._next_recovery_id
+                self._pending_recovery = _PendingRecovery(
+                    request_id=recovery_id,
+                    board=board,
+                    quad=recovered_quad,
+                    cutoff_timestamp_ns=latest.timestamp_ns,
+                    geometry=geometry,
+                    detector=FrameStabilityDetector(
+                        geometry,
+                        required_stable_pairs=self._stable_pairs,
+                    ),
+                )
+                self._paused_for_recovery = True
+            self._events.clear_frames()
+        self._emit(
+            LiveSyncStatus.RECOVERY_PENDING,
+            "manual recovery is waiting for a fresh stable frame",
             frame_size=latest.size,
+            point_count=90,
+            recovery_id=recovery_id,
         )
+        return recovery_id
 
     def _run(self) -> None:
         geometry: BoardGeometry | None = None
@@ -168,12 +256,13 @@ class LiveSyncSession:
                 try:
                     event = self._events.get(timeout=timeout)
                 except Empty:
-                    if (
-                        sampler is not None
-                        and tracker is not None
-                        and not self._is_paused_for_recovery()
-                    ):
+                    if sampler is not None and tracker is not None:
                         with self._processing_lock:
+                            if (
+                                self._is_recovery_pending()
+                                or self._is_paused_for_recovery()
+                            ):
+                                continue
                             self._process_samples(
                                 sampler.on_clock(perf_counter_ns()),
                                 sampler,
@@ -229,10 +318,12 @@ class LiveSyncSession:
                     )
                     continue
 
-                if self._is_paused_for_recovery():
-                    continue
-
                 with self._processing_lock:
+                    if self._is_recovery_pending():
+                        self._process_recovery_frame(event, tracker, sampler)
+                        continue
+                    if self._is_paused_for_recovery():
+                        continue
                     try:
                         samples = sampler.on_frame(event)
                     except FrameSizeChangedError as exc:
@@ -259,6 +350,8 @@ class LiveSyncSession:
         except (OSError, RuntimeError, ValueError) as exc:
             if not self._is_closed():
                 self._emit(LiveSyncStatus.ERROR, str(exc))
+        finally:
+            self._finalize("live sync worker stopped")
 
     def _process_samples(
         self,
@@ -267,6 +360,7 @@ class LiveSyncSession:
         tracker: StableMoveTracker,
     ) -> None:
         for sample in samples:
+            before_position_id = tracker.board.position_id
             update = tracker.push(sample.bgra)
             _set_sampling_mode(sampler, update.status)
             if update.status is TrackingStatus.ACCEPTED:
@@ -277,6 +371,7 @@ class LiveSyncSession:
                     "unique legal move accepted",
                     update,
                     frame_size=sample.size,
+                    before_position_id=before_position_id,
                 )
             elif update.status is TrackingStatus.WAITING_FOR_STABLE:
                 self._emit_tracking(
@@ -311,6 +406,50 @@ class LiveSyncSession:
                     frame_size=sample.size,
                 )
 
+    def _process_recovery_frame(
+        self,
+        frame: CaptureFrame,
+        tracker: StableMoveTracker,
+        sampler: AdaptiveBurstSampler,
+    ) -> None:
+        with self._lock:
+            pending = self._pending_recovery
+        if pending is None or frame.timestamp_ns <= pending.cutoff_timestamp_ns:
+            return
+        if frame.size != pending.geometry.frame_size:
+            pending.geometry = BoardGeometry.from_quad(
+                pending.quad,
+                frame.size,
+                pending.board.orientation,
+            )
+            pending.detector = FrameStabilityDetector(
+                pending.geometry,
+                required_stable_pairs=self._stable_pairs,
+            )
+        change = pending.detector.update(frame.bgra)
+        if change is None or not change.stable:
+            return
+        before_position_id = tracker.board.position_id
+        update = tracker.recover(
+            pending.board,
+            frame.bgra,
+            geometry=pending.geometry,
+        )
+        sampler.initialize(frame)
+        with self._lock:
+            self._board = update.board
+            self._quad = pending.quad
+            self._pending_recovery = None
+            self._paused_for_recovery = False
+        self._emit_tracking(
+            LiveSyncStatus.RECOVERY_ACCEPTED,
+            "manual recovery accepted from a fresh stable frame",
+            update,
+            frame_size=frame.size,
+            before_position_id=before_position_id,
+            recovery_id=pending.request_id,
+        )
+
     def _emit_tracking(
         self,
         status: LiveSyncStatus,
@@ -318,6 +457,8 @@ class LiveSyncSession:
         update: TrackingUpdate,
         *,
         frame_size: tuple[int, int],
+        before_position_id: str | None = None,
+        recovery_id: int | None = None,
     ) -> None:
         with self._lock:
             self._last_status = status
@@ -328,6 +469,8 @@ class LiveSyncSession:
                 message=message,
                 move=update.move,
                 observation=update.observation,
+                before_position_id=before_position_id,
+                recovery_id=recovery_id,
                 frame_size=frame_size,
                 point_count=90,
             )
@@ -340,6 +483,7 @@ class LiveSyncSession:
         *,
         frame_size: tuple[int, int] | None = None,
         point_count: int = 0,
+        recovery_id: int | None = None,
     ) -> None:
         with self._lock:
             self._last_status = status
@@ -348,6 +492,7 @@ class LiveSyncSession:
                 status=status,
                 board=self.board,
                 message=message,
+                recovery_id=recovery_id,
                 frame_size=frame_size,
                 point_count=point_count,
             )
@@ -360,6 +505,17 @@ class LiveSyncSession:
             self._closed_emitted = True
         self._emit(LiveSyncStatus.CLOSED, message)
 
+    def _finalize(self, message: str) -> None:
+        with self._lock:
+            self._closed = True
+        try:
+            self._source.close()
+        except (OSError, RuntimeError):
+            pass
+        with self._lock:
+            self._finalized = True
+        self._emit_closed(message)
+
     def _is_closed(self) -> bool:
         with self._lock:
             return self._closed
@@ -367,6 +523,10 @@ class LiveSyncSession:
     def _is_paused_for_recovery(self) -> bool:
         with self._lock:
             return self._paused_for_recovery
+
+    def _is_recovery_pending(self) -> bool:
+        with self._lock:
+            return self._pending_recovery is not None
 
     def _keep_visible_status(self) -> bool:
         with self._lock:

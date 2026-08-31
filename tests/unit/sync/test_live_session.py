@@ -1,16 +1,21 @@
 from __future__ import annotations
 
-from time import monotonic, sleep
+from threading import Event, Lock, current_thread
+from time import monotonic, perf_counter_ns, sleep
+from typing import Self
 
 import numpy as np
+import pytest
 
 from xiangqi_agent.capture.fake import FakeFrameSource
+from xiangqi_agent.capture.protocol import CaptureClosedError, CaptureFrame
 from xiangqi_agent.domain.board import BoardState
 from xiangqi_agent.domain.fen import parse_fen
 from xiangqi_agent.domain.rules import apply_move, legal_moves
 from xiangqi_agent.sync.live_session import (
     LiveSyncSession,
     LiveSyncStatus,
+    _CoalescingEventQueue,
 )
 from xiangqi_agent.vision.geometry import parse_normalized_quad
 
@@ -45,6 +50,49 @@ def _wait_until(predicate: object, *, timeout: float = 2.0) -> None:
             return
         sleep(0.01)
     raise AssertionError("timed out waiting for live sync update")
+
+
+class _ThrowingCloseSource(FakeFrameSource):
+    def __init__(self, hwnd: int) -> None:
+        super().__init__(hwnd)
+        self.close_calls = 0
+
+    def close(self) -> None:
+        self.close_calls += 1
+        super().close()
+        raise RuntimeError("close failed")
+
+
+class _RecoveryFirstLock:
+    def __init__(self) -> None:
+        self.worker_waiting = Event()
+        self.allow_worker = Event()
+        self._lock = Lock()
+
+    def __enter__(self) -> Self:
+        if current_thread().name == "xiangqi-live-sync":
+            self.worker_waiting.set()
+            assert self.allow_worker.wait(2.0)
+        self._lock.acquire()
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        self._lock.release()
+
+
+def test_live_event_queue_coalesces_frames_and_preserves_terminal_events() -> None:
+    events = _CoalescingEventQueue(max_frames=3)
+    pixels = np.zeros((2, 2, 4), dtype=np.uint8)
+
+    for timestamp in range(10):
+        events.put_frame(CaptureFrame(timestamp, 42, pixels))
+
+    assert events.pending_frame_count == 3
+    assert [events.get(timeout=0).timestamp_ns for _ in range(3)] == [7, 8, 9]
+
+    error = CaptureClosedError("target closed")
+    events.put_terminal(error)
+    assert events.get(timeout=0) is error
 
 
 def test_live_session_tracks_multiple_unique_moves_without_restarting() -> None:
@@ -160,19 +208,115 @@ def test_live_session_requires_explicit_recovery_after_unsafe_resize() -> None:
     _wait_until(lambda: any(update.status is LiveSyncStatus.CONTEXT_INVALID for update in updates))
     assert session.board == board
 
-    session.recover(board, quad=QUAD)
-    _wait_until(
-        lambda: any(
-            update.status is LiveSyncStatus.WATCHING
-            for update in updates
-            if update.frame_size == (432, 240)
-        )
-    )
+    session.recover(after, quad=QUAD)
+    _wait_until(lambda: any(update.status is LiveSyncStatus.RECOVERY_PENDING for update in updates))
+    assert session.board == board
 
     moved = np.repeat(_render(after), 2, axis=1)
-    source.push(moved, 250_000_000)
+    animated = moved.copy()
+    animated[:CELL, : CELL * 2, :3] = 255
+    source.push(animated, 250_000_000)
+    source.push(moved, 300_000_000)
     source.push(moved.copy(), 360_000_000)
-    _wait_until(lambda: any(update.status is LiveSyncStatus.MOVE_ACCEPTED for update in updates))
+    sleep(0.05)
+    assert session.board == board
 
+    source.push(moved.copy(), 420_000_000)
+    _wait_until(lambda: any(update.status is LiveSyncStatus.RECOVERY_ACCEPTED for update in updates))
+
+    assert session.board == after
+    session.close()
+
+
+def test_live_session_closes_owned_source_after_processing_error() -> None:
+    board = parse_fen(START)
+    source = FakeFrameSource(hwnd=42)
+    updates = []
+    session = LiveSyncSession(
+        source,
+        board,
+        QUAD,
+        on_update=updates.append,
+        patch_size=CELL,
+        stable_pairs=2,
+    )
+    session.start()
+    baseline = _render(board)
+    source.push(baseline, 0)
+    source.push(baseline.copy(), 50_000_000)
+    source.push(baseline.copy(), 100_000_000)
+    _wait_until(lambda: any(update.status is LiveSyncStatus.BASELINE_READY for update in updates))
+
+    source.push(baseline.copy(), 99_000_000)
+    _wait_until(lambda: any(update.status is LiveSyncStatus.ERROR for update in updates))
+    _wait_until(lambda: any(update.status is LiveSyncStatus.CLOSED for update in updates))
+
+    with pytest.raises(CaptureClosedError, match="closed"):
+        source.push(baseline.copy(), 110_000_000)
+    session.close()
+
+
+def test_live_session_close_finishes_when_owned_source_close_raises() -> None:
+    source = _ThrowingCloseSource(hwnd=42)
+    updates = []
+    session = LiveSyncSession(source, parse_fen(START), QUAD, on_update=updates.append)
+    session.start()
+
+    session.close()
+    session.close()
+
+    assert source.close_calls >= 1
+    assert [update.status for update in updates].count(LiveSyncStatus.CLOSED) == 1
+
+
+def test_recovery_wins_over_a_frame_dequeued_before_the_processing_lock() -> None:
+    board = parse_fen(START)
+    move = _move(board, "h2e2")
+    after = apply_move(board, move)
+    source = FakeFrameSource(hwnd=42)
+    updates = []
+    session = LiveSyncSession(
+        source,
+        board,
+        QUAD,
+        on_update=updates.append,
+        patch_size=CELL,
+        steady_fps=1,
+        settle_ms=100,
+        stable_pairs=2,
+    )
+    session.start()
+    baseline = _render(board)
+    timestamp = perf_counter_ns()
+    source.push(baseline, timestamp)
+    source.push(baseline.copy(), timestamp + 50_000_000)
+    source.push(baseline.copy(), timestamp + 100_000_000)
+    _wait_until(lambda: any(update.status is LiveSyncStatus.BASELINE_READY for update in updates))
+
+    ordered_lock = _RecoveryFirstLock()
+    session._processing_lock = ordered_lock
+    moved = _render(after)
+    source.push(moved, timestamp + 150_000_000)
+    assert ordered_lock.worker_waiting.wait(2.0)
+
+    session.recover(after)
+    pending_index = next(
+        index
+        for index, update in enumerate(updates)
+        if update.status is LiveSyncStatus.RECOVERY_PENDING
+    )
+    ordered_lock.allow_worker.set()
+    sleep(0.05)
+
+    assert all(
+        update.status
+        not in (LiveSyncStatus.MOVE_ACCEPTED, LiveSyncStatus.WAITING_FOR_STABLE)
+        for update in updates[pending_index + 1 :]
+    )
+
+    source.push(moved.copy(), timestamp + 210_000_000)
+    source.push(moved.copy(), timestamp + 270_000_000)
+    source.push(moved.copy(), timestamp + 330_000_000)
+    _wait_until(lambda: any(update.status is LiveSyncStatus.RECOVERY_ACCEPTED for update in updates))
     assert session.board == after
     session.close()

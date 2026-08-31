@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import replace
+from dataclasses import dataclass, replace
+from enum import StrEnum
 from typing import Protocol
 
 from PySide6.QtCore import QObject, Signal
@@ -46,10 +47,31 @@ class _CaptureBridge(QObject):
     update = Signal(object)
 
 
+@dataclass(frozen=True, slots=True)
+class _TaggedCaptureUpdate:
+    generation: int
+    update: CaptureMonitorUpdate | LiveSyncUpdate
+
+
+class CaptureRecoveryStatus(StrEnum):
+    NOT_CONNECTED = "not_connected"
+    PENDING = "pending"
+    FAILED = "failed"
+
+
+@dataclass(frozen=True, slots=True)
+class CaptureRecoveryResult:
+    status: CaptureRecoveryStatus
+    board: BoardState | None
+    message: str
+    recovery_id: int | None = None
+
+
 class CapturePanel(QWidget):
     """Connect a user-selected visible window to fixed manual board geometry."""
 
     sync_update = Signal(object)
+    session_reset = Signal()
 
     def __init__(
         self,
@@ -68,6 +90,7 @@ class CapturePanel(QWidget):
         self._windows: tuple[WindowInfo, ...] = ()
         self._monitor: CaptureMonitor | None = None
         self._session: LiveSyncSession | None = None
+        self._generation = 0
         self._bridge = _CaptureBridge(self)
         self._bridge.update.connect(self._show_update)
 
@@ -100,8 +123,10 @@ class CapturePanel(QWidget):
         self.connect_button.clicked.connect(self._toggle_capture)
 
     def close_capture(self) -> None:
+        self._generation += 1
         monitor = self._monitor
         session = self._session
+        had_active_session = monitor is not None or session is not None
         self._monitor = None
         self._session = None
         if monitor is not None:
@@ -114,20 +139,36 @@ class CapturePanel(QWidget):
         self.quad_input.setEnabled(True)
         self.orientation_combo.setEnabled(True)
         self.connect_button.setEnabled(bool(self._windows))
+        if had_active_session:
+            self.session_reset.emit()
 
     def set_board_provider(self, provider: BoardProvider) -> None:
         self._board_provider = provider
 
-    def recover(self, board: BoardState) -> None:
+    def recover(self, board: BoardState) -> CaptureRecoveryResult:
         session = self._session
-        if session is None:
-            return
         try:
             orientation = Orientation(str(self.orientation_combo.currentData()))
+            recovered_board = replace(board, orientation=orientation)
+            if session is None:
+                return CaptureRecoveryResult(
+                    CaptureRecoveryStatus.NOT_CONNECTED,
+                    recovered_board,
+                    "no active capture session",
+                )
             quad = parse_normalized_quad(self.quad_input.text().strip())
-            session.recover(replace(board, orientation=orientation), quad=quad)
+            recovery_id = session.recover(recovered_board, quad=quad)
         except (GeometryError, RuntimeError, TypeError, ValueError) as exc:
-            self.status_label.setText(f"同步恢复失败：{exc}")
+            message = f"同步恢复失败：{exc}"
+            self.status_label.setText(message)
+            return CaptureRecoveryResult(CaptureRecoveryStatus.FAILED, None, message)
+        self.status_label.setText("同步恢复已请求，正在等待新的稳定画面")
+        return CaptureRecoveryResult(
+            CaptureRecoveryStatus.PENDING,
+            recovered_board,
+            "waiting for a fresh stable capture frame",
+            recovery_id,
+        )
 
     def _refresh_windows(self) -> None:
         self.close_capture()
@@ -172,12 +213,18 @@ class CapturePanel(QWidget):
             self.status_label.setText(f"四角标定无效：{exc}")
             return
 
+        self._generation += 1
+        generation = self._generation
+
+        def forward(update: CaptureMonitorUpdate | LiveSyncUpdate) -> None:
+            self._bridge.update.emit(_TaggedCaptureUpdate(generation, update))
+
         if self._board_provider is None:
             self._monitor = CaptureMonitor(
                 source,
                 quad,
                 orientation=orientation,
-                on_update=self._bridge.update.emit,
+                on_update=forward,
             )
         else:
             try:
@@ -189,7 +236,7 @@ class CapturePanel(QWidget):
                 source,
                 board,
                 quad,
-                on_update=self._bridge.update.emit,
+                on_update=forward,
                 patch_size=self._patch_size,
             )
         self.connect_button.setText("断开")
@@ -202,7 +249,10 @@ class CapturePanel(QWidget):
         elif self._monitor is not None:
             self._monitor.start()
 
-    def _show_update(self, update: CaptureMonitorUpdate | LiveSyncUpdate) -> None:
+    def _show_update(self, tagged: _TaggedCaptureUpdate) -> None:
+        if tagged.generation != self._generation:
+            return
+        update = tagged.update
         if isinstance(update, LiveSyncUpdate):
             self._show_live_update(update)
             return
@@ -246,6 +296,10 @@ class CapturePanel(QWidget):
         elif update.status is LiveSyncStatus.MOVE_ACCEPTED:
             move = update.move.uci if update.move is not None else "未知"
             self.status_label.setText(f"已同步一步：{move}")
+        elif update.status is LiveSyncStatus.RECOVERY_PENDING:
+            self.status_label.setText("同步恢复已请求，正在等待新的稳定画面")
+        elif update.status is LiveSyncStatus.RECOVERY_ACCEPTED:
+            self.status_label.setText("同步恢复成功，已继续监听")
         elif update.status is LiveSyncStatus.GEOMETRY_REBOUND:
             self.status_label.setText(
                 f"窗口缩放后已安全适配：{width}×{height}，{update.point_count} 个交点"

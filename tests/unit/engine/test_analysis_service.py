@@ -6,7 +6,7 @@ from xiangqi_agent.domain.analysis import EngineAnalysis, EngineLine
 from xiangqi_agent.domain.board import BoardState
 from xiangqi_agent.domain.fen import parse_fen
 from xiangqi_agent.domain.rules import apply_move, legal_moves
-from xiangqi_agent.engine.service import AnalysisService
+from xiangqi_agent.engine.service import AnalysisFailure, AnalysisService
 
 START = "rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w"
 
@@ -160,15 +160,16 @@ def test_service_reports_current_generation_failure_without_emitting_analysis() 
         ) -> EngineAnalysis:
             raise RuntimeError("engine failed")
 
-    errors: list[str] = []
+    errors: list[AnalysisFailure] = []
     failed = Event()
     service = AnalysisService(
         FailingEngine(),
         on_error=lambda message: (errors.append(message), failed.set()),
     )
 
-    service.submit(parse_fen(START))
+    board = parse_fen(START)
+    generation = service.submit(board)
     assert failed.wait(2.0)
     service.close()
 
-    assert errors == ["engine failed"]
+    assert errors == [AnalysisFailure(board.position_id, generation, "engine failed")]

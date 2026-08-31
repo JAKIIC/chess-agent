@@ -10,10 +10,12 @@ from xiangqi_agent.capture.fake import FakeFrameSource
 from xiangqi_agent.capture.protocol import CaptureClosedError
 from xiangqi_agent.coach.client import DeepSeekClient
 from xiangqi_agent.domain.analysis import EngineAnalysis, EngineLine
-from xiangqi_agent.domain.board import BoardState
+from xiangqi_agent.domain.board import BoardState, Orientation
 from xiangqi_agent.domain.fen import parse_fen
 from xiangqi_agent.domain.rules import apply_move, legal_moves
+from xiangqi_agent.engine.service import AnalysisFailure
 from xiangqi_agent.platform.windows import WindowInfo
+from xiangqi_agent.sync.live_session import LiveSyncStatus, LiveSyncUpdate
 from xiangqi_agent.ui.capture_panel import CapturePanel
 from xiangqi_agent.ui.main_window import MainWindow
 
@@ -149,11 +151,20 @@ def test_missing_local_engine_shows_install_guidance_without_crashing(
     )
     qtbot.addWidget(window)  # type: ignore[attr-defined]
 
-    assert not window.analyse_button.isEnabled()
+    assert window.analyse_button.isEnabled()
     assert "未安装" in window.phase_label.text()
     assert "install_pikafish.py" in window.guidance_label.text()
     assert window.board_widget.board is not None
     assert window.board_widget.board.fen == START
+
+    board = parse_fen(START)
+    move = next(move for move in legal_moves(board) if move.uci == "h2e2")
+    after = apply_move(board, move)
+    window.fen_input.setText(after.fen)
+    qtbot.mouseClick(window.analyse_button, Qt.MouseButton.LeftButton)  # type: ignore[attr-defined]
+    assert window.board_widget.board is not None
+    assert window.board_widget.board.position_id == after.position_id
+    assert "Pikafish 未安装" in window.phase_label.text()
 
     window.close()
 
@@ -181,7 +192,9 @@ def test_main_window_closes_connected_capture_panel(qtbot: object) -> None:
         source.push(np.zeros((200, 300, 4), dtype=np.uint8), timestamp_ns=2)
 
 
-def test_confirmed_live_move_updates_board_and_starts_analysis(qtbot: object) -> None:
+def test_confirmed_live_move_updates_board_without_starting_gated_analysis(
+    qtbot: object,
+) -> None:
     board = parse_fen(START)
     move = next(move for move in legal_moves(board) if move.uci == "h2e2")
     after = apply_move(board, move)
@@ -213,14 +226,285 @@ def test_confirmed_live_move_updates_board_and_starts_analysis(qtbot: object) ->
     source.push(moved, 150_000_000)
     source.push(moved.copy(), 260_000_000)
 
-    qtbot.waitUntil(  # type: ignore[attr-defined]
-        lambda: window.board_widget.board == after
-        and len([call for call in engine.calls if call[0] == after.position_id]) == 2
-        and window.phase_label.text().startswith("加深分析"),
-        timeout=3000,
-    )
+    qtbot.waitUntil(lambda: window.board_widget.board == after, timeout=3000)  # type: ignore[attr-defined]
 
     assert window.fen_input.text() == after.fen
-    assert window.results.rowCount() == 1
-    assert window.phase_label.text().startswith("加深分析")
+    assert engine.calls == []
+    assert window.results.rowCount() == 0
+    assert "盲测" in window.phase_label.text()
+    window.close()
+
+
+def test_main_window_rejects_move_whose_before_position_is_stale(qtbot: object) -> None:
+    board = parse_fen(START)
+    move = next(move for move in legal_moves(board) if move.uci == "h2e2")
+    after = apply_move(board, move)
+    engine = ImmediateEngine()
+    capture_panel = CapturePanel(catalog=OneWindowCatalog(WindowInfo(42, "天天象棋", "x", (1, 1))))
+    window = MainWindow(
+        engine=engine,
+        coach_client=DeepSeekClient(api_key=None),
+        capture_panel=capture_panel,
+    )
+    qtbot.addWidget(window)  # type: ignore[attr-defined]
+
+    capture_panel.sync_update.emit(
+        LiveSyncUpdate(
+            status=LiveSyncStatus.MOVE_ACCEPTED,
+            board=after,
+            message="stale move",
+            move=move,
+            before_position_id="not-the-current-position",
+        )
+    )
+
+    assert window.board_widget.board == board
+    assert window.fen_input.text() == board.fen
+    assert engine.calls == []
+    window.close()
+
+
+def test_manual_fen_waits_for_stable_capture_recovery_before_adoption(qtbot: object) -> None:
+    board = parse_fen(START)
+    move = next(move for move in legal_moves(board) if move.uci == "h2e2")
+    after = apply_move(board, move)
+    target = WindowInfo(42, "天天象棋", "WeChatAppEx.exe", (216, 240))
+    source = FakeFrameSource(target.hwnd)
+    capture_panel = CapturePanel(
+        catalog=OneWindowCatalog(target),
+        source_factory=lambda _: source,
+        patch_size=CELL,
+    )
+    engine = ImmediateEngine()
+    window = MainWindow(
+        engine=engine,
+        coach_client=DeepSeekClient(api_key=None),
+        capture_panel=capture_panel,
+        quick_ms=20,
+        deep_ms=100,
+    )
+    qtbot.addWidget(window)  # type: ignore[attr-defined]
+    capture_panel.refresh_button.click()
+    capture_panel.quad_input.setText(TEST_QUAD)
+    capture_panel.connect_button.click()
+    baseline = _render(board)
+    source.push(baseline, 0)
+    source.push(baseline.copy(), 50_000_000)
+    source.push(baseline.copy(), 100_000_000)
+    qtbot.waitUntil(lambda: "实时同步已启动" in capture_panel.status_label.text(), timeout=2000)  # type: ignore[attr-defined]
+
+    window.fen_input.setText(after.fen)
+    qtbot.mouseClick(window.analyse_button, Qt.MouseButton.LeftButton)  # type: ignore[attr-defined]
+
+    assert window.board_widget.board == board
+    assert engine.calls == []
+    assert "稳定画面" in window.phase_label.text()
+
+    moved = _render(after)
+    source.push(moved, 150_000_000)
+    source.push(moved.copy(), 210_000_000)
+    source.push(moved.copy(), 270_000_000)
+    qtbot.waitUntil(  # type: ignore[attr-defined]
+        lambda: window.board_widget.board is not None
+        and window.board_widget.board.position_id == after.position_id
+        and len(engine.calls) == 2,
+        timeout=3000,
+    )
+    window.close()
+
+
+def test_black_bottom_baseline_updates_mirror_orientation_without_analysis(qtbot: object) -> None:
+    board = parse_fen(START)
+    target = WindowInfo(42, "天天象棋", "WeChatAppEx.exe", (216, 240))
+    source = FakeFrameSource(target.hwnd)
+    capture_panel = CapturePanel(
+        catalog=OneWindowCatalog(target),
+        source_factory=lambda _: source,
+        patch_size=CELL,
+    )
+    engine = ImmediateEngine()
+    window = MainWindow(
+        engine=engine,
+        coach_client=DeepSeekClient(api_key=None),
+        capture_panel=capture_panel,
+    )
+    qtbot.addWidget(window)  # type: ignore[attr-defined]
+    capture_panel.refresh_button.click()
+    capture_panel.quad_input.setText(TEST_QUAD)
+    capture_panel.orientation_combo.setCurrentIndex(1)
+    capture_panel.connect_button.click()
+    baseline = _render(board)
+    source.push(baseline, 0)
+    source.push(baseline.copy(), 50_000_000)
+    source.push(baseline.copy(), 100_000_000)
+
+    qtbot.waitUntil(  # type: ignore[attr-defined]
+        lambda: window.board_widget.board is not None
+        and window.board_widget.board.orientation is Orientation.BLACK_BOTTOM,
+        timeout=2000,
+    )
+    assert engine.calls == []
+    window.close()
+
+
+def test_main_window_ignores_analysis_failure_for_an_old_position(qtbot: object) -> None:
+    window = MainWindow(
+        engine=ImmediateEngine(),
+        coach_client=DeepSeekClient(api_key=None),
+    )
+    qtbot.addWidget(window)  # type: ignore[attr-defined]
+    assert window.board_widget.board is not None
+    window._adopt_board(window.board_widget.board, "current analysis")
+    assert window._analysis_generation is not None
+    generation = window._analysis_generation
+    before = window.phase_label.text()
+
+    window._show_error(
+        AnalysisFailure(window.board_widget.board.position_id, generation - 1, "old failure")
+    )
+
+    assert window.phase_label.text() == before
+    window._show_error(
+        AnalysisFailure(window.board_widget.board.position_id, generation, "current failure")
+    )
+    assert window.phase_label.text() == "分析暂停：current failure"
+    window.close()
+
+
+def test_capture_failure_cancels_pending_manual_recovery_without_adopting(qtbot: object) -> None:
+    board = parse_fen(START)
+    move = next(move for move in legal_moves(board) if move.uci == "h2e2")
+    pending = apply_move(board, move)
+    capture_panel = CapturePanel(
+        catalog=OneWindowCatalog(WindowInfo(42, "天天象棋", "x", (1, 1)))
+    )
+    window = MainWindow(
+        engine=ImmediateEngine(),
+        coach_client=DeepSeekClient(api_key=None),
+        capture_panel=capture_panel,
+    )
+    qtbot.addWidget(window)  # type: ignore[attr-defined]
+    window._pending_manual_board = pending
+
+    capture_panel.sync_update.emit(
+        LiveSyncUpdate(
+            status=LiveSyncStatus.ERROR,
+            board=board,
+            message="capture failed",
+        )
+    )
+
+    assert window._pending_manual_board is None
+    assert window.board_widget.board == board
+    assert "原局面" in window.phase_label.text()
+    window.close()
+
+
+def test_stale_recovery_acceptance_cannot_satisfy_a_newer_request(qtbot: object) -> None:
+    board = parse_fen(START)
+    move = next(move for move in legal_moves(board) if move.uci == "h2e2")
+    pending = apply_move(board, move)
+    capture_panel = CapturePanel(
+        catalog=OneWindowCatalog(WindowInfo(42, "天天象棋", "x", (1, 1)))
+    )
+    window = MainWindow(
+        engine=ImmediateEngine(),
+        coach_client=DeepSeekClient(api_key=None),
+        capture_panel=capture_panel,
+    )
+    qtbot.addWidget(window)  # type: ignore[attr-defined]
+    window._pending_manual_board = pending
+    window._pending_recovery_id = 2
+
+    capture_panel.sync_update.emit(
+        LiveSyncUpdate(
+            status=LiveSyncStatus.RECOVERY_ACCEPTED,
+            board=pending,
+            message="old recovery",
+            recovery_id=1,
+        )
+    )
+
+    assert window.board_widget.board == board
+    assert window._pending_manual_board == pending
+    assert window._pending_recovery_id == 2
+    window.close()
+
+
+def test_live_move_is_ignored_while_manual_recovery_is_pending(qtbot: object) -> None:
+    board = parse_fen(START)
+    move = next(move for move in legal_moves(board) if move.uci == "h2e2")
+    after = apply_move(board, move)
+    capture_panel = CapturePanel(
+        catalog=OneWindowCatalog(WindowInfo(42, "天天象棋", "x", (1, 1)))
+    )
+    window = MainWindow(
+        engine=ImmediateEngine(),
+        coach_client=DeepSeekClient(api_key=None),
+        capture_panel=capture_panel,
+    )
+    qtbot.addWidget(window)  # type: ignore[attr-defined]
+    window._pending_manual_board = after
+    window._pending_recovery_id = 1
+
+    capture_panel.sync_update.emit(
+        LiveSyncUpdate(
+            status=LiveSyncStatus.MOVE_ACCEPTED,
+            board=after,
+            message="old move",
+            move=move,
+            before_position_id=board.position_id,
+        )
+    )
+
+    assert window.board_widget.board == board
+    assert window._pending_manual_board == after
+    window.close()
+
+
+def test_disconnect_cancels_pending_recovery_and_reconnect_accepts_moves(qtbot: object) -> None:
+    board = parse_fen(START)
+    move = next(move for move in legal_moves(board) if move.uci == "h2e2")
+    after = apply_move(board, move)
+    target = WindowInfo(42, "天天象棋", "WeChatAppEx.exe", (216, 240))
+    first_source = FakeFrameSource(target.hwnd)
+    second_source = FakeFrameSource(target.hwnd)
+    sources = iter((first_source, second_source))
+    capture_panel = CapturePanel(
+        catalog=OneWindowCatalog(target),
+        source_factory=lambda _: next(sources),
+        patch_size=CELL,
+    )
+    window = MainWindow(
+        engine=ImmediateEngine(),
+        coach_client=DeepSeekClient(api_key=None),
+        capture_panel=capture_panel,
+    )
+    qtbot.addWidget(window)  # type: ignore[attr-defined]
+    capture_panel.refresh_button.click()
+    capture_panel.quad_input.setText(TEST_QUAD)
+    capture_panel.connect_button.click()
+    baseline = _render(board)
+    first_source.push(baseline, 0)
+    first_source.push(baseline.copy(), 50_000_000)
+    first_source.push(baseline.copy(), 100_000_000)
+    qtbot.waitUntil(lambda: "实时同步已启动" in capture_panel.status_label.text(), timeout=2000)  # type: ignore[attr-defined]
+
+    window.fen_input.setText(after.fen)
+    window.analyse_button.click()
+    assert window._pending_manual_board is not None
+    capture_panel.connect_button.click()
+
+    assert window._pending_manual_board is None
+    assert window._pending_recovery_id is None
+
+    capture_panel.connect_button.click()
+    second_source.push(baseline, 0)
+    second_source.push(baseline.copy(), 50_000_000)
+    second_source.push(baseline.copy(), 100_000_000)
+    qtbot.waitUntil(lambda: "实时同步已启动" in capture_panel.status_label.text(), timeout=2000)  # type: ignore[attr-defined]
+    moved = _render(after)
+    second_source.push(moved, 150_000_000)
+    second_source.push(moved.copy(), 260_000_000)
+    qtbot.waitUntil(lambda: window.board_widget.board == after, timeout=2000)  # type: ignore[attr-defined]
     window.close()

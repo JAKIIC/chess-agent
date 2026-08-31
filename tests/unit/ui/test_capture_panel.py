@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from threading import Thread
+
 import numpy as np
 from PySide6.QtCore import Qt
 
@@ -138,4 +140,31 @@ def test_capture_panel_emits_rule_confirmed_board_updates(qtbot: object) -> None
     accepted = next(update for update in updates if update.status is LiveSyncStatus.MOVE_ACCEPTED)
     assert accepted.board == after
     assert "已同步" in panel.status_label.text()
+    panel.close_capture()
+
+
+def test_capture_panel_ignores_queued_updates_from_a_closed_generation(qtbot: object) -> None:
+    target = WindowInfo(42, "天天象棋", "WeChatAppEx.exe", (300, 200))
+    old_source = FakeFrameSource(target.hwnd)
+    current_source = FakeFrameSource(target.hwnd)
+    sources = iter((old_source, current_source))
+    panel = CapturePanel(
+        catalog=FakeCatalog((target,)),
+        source_factory=lambda _: next(sources),
+    )
+    qtbot.addWidget(panel)  # type: ignore[attr-defined]
+
+    panel.refresh_button.click()
+    panel.connect_button.click()
+    old_close = Thread(target=old_source.simulate_target_close)
+    old_close.start()
+    old_close.join()
+
+    panel.close_capture()
+    panel.connect_button.click()
+    qtbot.wait(100)  # type: ignore[attr-defined]
+
+    assert panel.connect_button.text() == "断开"
+    current_source.push(np.zeros((200, 300, 4), dtype=np.uint8), timestamp_ns=1)
+    qtbot.waitUntil(lambda: "90" in panel.status_label.text(), timeout=1000)  # type: ignore[attr-defined]
     panel.close_capture()

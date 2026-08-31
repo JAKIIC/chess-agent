@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass
 from threading import Condition, Thread
 from typing import Protocol
 
@@ -8,7 +9,16 @@ from xiangqi_agent.domain.analysis import EngineAnalysis
 from xiangqi_agent.domain.board import BoardState
 
 type AnalysisCallback = Callable[[EngineAnalysis], None]
-type ErrorCallback = Callable[[str], None]
+
+
+@dataclass(frozen=True, slots=True)
+class AnalysisFailure:
+    position_id: str
+    generation: int
+    message: str
+
+
+type ErrorCallback = Callable[[AnalysisFailure], None]
 
 
 class AnalysisEngine(Protocol):
@@ -58,6 +68,7 @@ class AnalysisService:
         self._generation = 0
         self._pending: tuple[int, BoardState] | None = None
         self._active_generation: int | None = None
+        self._active_board: BoardState | None = None
         self._closed = False
         self._worker: Thread | None = None
 
@@ -123,7 +134,9 @@ class AnalysisService:
                 self._finish_generation(generation)
         except (OSError, RuntimeError, ValueError) as exc:
             if not self._is_closed():
-                self._on_error(str(exc))
+                failure = self._current_failure(str(exc))
+                if failure is not None:
+                    self._on_error(failure)
         finally:
             self._engine.close()
 
@@ -137,6 +150,7 @@ class AnalysisService:
             task = self._pending
             self._pending = None
             self._active_generation = task[0]
+            self._active_board = task[1]
             return task
 
     def _analyse_phase(
@@ -154,12 +168,18 @@ class AnalysisService:
             )
         except (OSError, RuntimeError, ValueError) as exc:
             if self._is_current(generation):
-                self._on_error(str(exc))
+                self._on_error(AnalysisFailure(board.position_id, generation, str(exc)))
             return False
         if not self._is_current(generation):
             return False
         if analysis.position_id != board.position_id:
-            self._on_error("engine analysis position_id did not match the confirmed board")
+            self._on_error(
+                AnalysisFailure(
+                    board.position_id,
+                    generation,
+                    "engine analysis position_id did not match the confirmed board",
+                )
+            )
             return False
         callback(analysis)
         return True
@@ -176,11 +196,25 @@ class AnalysisService:
         with self._condition:
             if self._active_generation == generation:
                 self._active_generation = None
+                self._active_board = None
+
+    def _current_failure(self, message: str) -> AnalysisFailure | None:
+        with self._condition:
+            if self._active_generation is not None and self._active_board is not None:
+                return AnalysisFailure(
+                    self._active_board.position_id,
+                    self._active_generation,
+                    message,
+                )
+            if self._pending is not None:
+                generation, board = self._pending
+                return AnalysisFailure(board.position_id, generation, message)
+            return None
 
 
 def _ignore_analysis(_analysis: EngineAnalysis) -> None:
     pass
 
 
-def _ignore_error(_message: str) -> None:
+def _ignore_error(_failure: AnalysisFailure) -> None:
     pass
