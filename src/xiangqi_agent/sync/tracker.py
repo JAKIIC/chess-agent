@@ -237,6 +237,8 @@ def _owned_frame(frame: NDArray[np.generic]) -> NDArray[np.uint8]:
 
 def _is_incomplete_endpoint_transition(observation: MoveProposal) -> bool:
     reasons = frozenset(observation.evidence.rejection_reasons)
+    if "semantic_noop" in reasons:
+        return True
     source_missing = "source_change" in reasons
     destination_missing = "destination_change" in reasons
     return source_missing != destination_missing

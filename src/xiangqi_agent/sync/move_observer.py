@@ -131,6 +131,8 @@ class LegalMoveDiffObserver:
             min_semantic_margin=self._min_semantic_margin,
             min_semantic_evidence_score=self._min_evidence_score,
         )
+        if all(semantically_unchanged):
+            return _ambiguous((), local, ("semantic_noop",))
         candidates = tuple(
             sorted(
                 (

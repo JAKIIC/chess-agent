@@ -129,6 +129,46 @@ def test_tracker_keeps_watching_after_selection_highlight_then_accepts_move() ->
     assert accepted.move == move
 
 
+def test_tracker_waits_when_selection_cosmetically_changes_both_move_endpoints() -> None:
+    board = parse_fen(START)
+    move = _move(board, "h2e2")
+    baseline = _render(board)
+    checker = (np.indices((CELL, CELL)).sum(axis=0) % 2) * 40 - 20
+    for index in (move.from_index, move.to_index):
+        row, column = divmod(index, 9)
+        patch = baseline[
+            row * CELL : (row + 1) * CELL,
+            column * CELL : (column + 1) * CELL,
+            :3,
+        ]
+        patch[:] = np.clip(
+            patch.astype(np.int16) + checker[..., None],
+            0,
+            255,
+        ).astype(np.uint8)
+
+    selected = baseline.copy()
+    for index in (move.from_index, move.to_index):
+        row, column = divmod(index, 9)
+        patch = selected[
+            row * CELL : (row + 1) * CELL,
+            column * CELL : (column + 1) * CELL,
+            :3,
+        ]
+        patch[:] = np.roll(patch, shift=1, axis=1)
+
+    tracker = _tracker(board)
+    tracker.initialize(baseline)
+    tracker.push(selected)
+    tracker.push(selected.copy())
+
+    selection = tracker.push(selected.copy())
+
+    assert selection.status is TrackingStatus.WAITING_FOR_ENDPOINT
+    assert selection.board == board
+    assert selection.move is None
+
+
 def test_tracker_returns_to_watching_when_transient_change_restores_baseline() -> None:
     board = parse_fen(START)
     baseline = _render(board)
