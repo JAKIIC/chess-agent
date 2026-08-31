@@ -161,6 +161,11 @@ class CapturePanel(QWidget):
             self.status_label.setText(
                 f"捕获正常：{width}×{height}，{update.point_count} 个交点；自动同步未启用"
             )
+        elif update.status is MonitorStatus.GEOMETRY_REBOUND:
+            width, height = update.frame_size or (0, 0)
+            self.status_label.setText(
+                f"窗口尺寸已变化，已自动适配：{width}×{height}，{update.point_count} 个交点"
+            )
         elif update.status is MonitorStatus.GEOMETRY_INVALID:
             self.status_label.setText("窗口尺寸已变化，原四角标定失效；请断开后重新标定")
         elif update.status is MonitorStatus.CLOSED:

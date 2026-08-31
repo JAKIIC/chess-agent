@@ -74,6 +74,30 @@ def test_crop_intersections_returns_owned_ordered_patches_and_rejects_resize() -
         geometry.crop_intersections(np.zeros((height + 1, width, 4), dtype=np.uint8), size=8)
 
 
+def test_geometry_rebinds_normalized_quad_when_frame_aspect_ratio_is_stable() -> None:
+    geometry = BoardGeometry.from_quad(
+        NormalizedQuad(((0.1, 0.1), (0.9, 0.1), (0.9, 0.9), (0.1, 0.9))),
+        frame_size=(300, 200),
+    )
+
+    rebound = geometry.rebind((450, 300))
+
+    assert rebound.frame_size == (450, 300)
+    assert rebound.quad == geometry.quad
+    assert rebound.orientation is geometry.orientation
+    assert len(rebound.grid_points()) == 90
+
+
+def test_geometry_rebind_rejects_a_material_frame_aspect_ratio_change() -> None:
+    geometry = BoardGeometry.from_quad(
+        NormalizedQuad(((0.1, 0.1), (0.9, 0.1), (0.9, 0.9), (0.1, 0.9))),
+        frame_size=(300, 200),
+    )
+
+    with pytest.raises(GeometryError, match="aspect ratio"):
+        geometry.rebind((450, 200))
+
+
 @pytest.mark.parametrize(
     "points",
     (

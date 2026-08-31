@@ -20,12 +20,41 @@ from xiangqi_agent.sync.evidence import (
     MoveProposal,
     ObservationStatus,
 )
-from xiangqi_agent.sync.tracker import TrackingStatus
+from xiangqi_agent.sync.move_observer import LegalMoveDiffObserver
+from xiangqi_agent.sync.tracker import StableMoveTracker, TrackingStatus
 from xiangqi_agent.vision.endpoint_features import EndpointFeatures
+from xiangqi_agent.vision.geometry import BoardGeometry, NormalizedQuad
+
+CELL = 24
+PALETTE = {symbol: index * 15 for index, symbol in enumerate(".KABNRCPkabnrcp", start=1)}
 
 
 def _frame(timestamp_ns: int = 1, *, shape: tuple[int, int] = (2, 2)) -> CaptureFrame:
     return CaptureFrame(timestamp_ns, 1, np.zeros((*shape, 4), dtype=np.uint8))
+
+
+def _board_frame(timestamp_ns: int = 1) -> CaptureFrame:
+    board = parse_fen(probe.START_FEN)
+    pixels = np.zeros((CELL * 10, CELL * 9, 4), dtype=np.uint8)
+    pixels[..., 3] = 255
+    for index, symbol in enumerate(board.pieces):
+        row, column = divmod(index, 9)
+        pixels[
+            row * CELL : (row + 1) * CELL,
+            column * CELL : (column + 1) * CELL,
+            :3,
+        ] = PALETTE[symbol]
+    return CaptureFrame(timestamp_ns, 1, pixels)
+
+
+def _board_geometry() -> BoardGeometry:
+    return BoardGeometry.from_quad(
+        NormalizedQuad.from_pixels(
+            ((12, 12), (204, 12), (204, 228), (12, 228)),
+            (216, 240),
+        ),
+        (216, 240),
+    )
 
 
 def test_quiet_capture_reuses_the_latest_frame_as_a_stability_tick() -> None:
@@ -251,6 +280,32 @@ def test_probe_keeps_burst_sampling_while_waiting_for_the_second_endpoint() -> N
     probe._set_sampling_mode(sampler, TrackingStatus.WAITING_FOR_ENDPOINT)
 
     assert sampler.bursting
+
+
+def test_probe_rebinds_tracker_and_sampler_to_a_safe_resized_frame() -> None:
+    baseline = _board_frame()
+    board = parse_fen(probe.START_FEN)
+    tracker = StableMoveTracker(
+        board,
+        _board_geometry(),
+        LegalMoveDiffObserver(patch_size=CELL),
+        required_stable_pairs=2,
+        patch_size=CELL,
+    )
+    tracker.initialize(baseline.bgra)
+    sampler = AdaptiveBurstSampler(steady_fps=2, settle_ms=100, stable_repeats=2)
+    sampler.initialize(baseline)
+    resized = CaptureFrame(
+        2,
+        1,
+        np.repeat(np.repeat(baseline.bgra, 2, axis=0), 2, axis=1),
+    )
+
+    update = probe._rebind_after_resize(tracker, sampler, resized)
+
+    assert update.status is TrackingStatus.WATCHING
+    assert tracker.geometry.frame_size == resized.size
+    assert sampler.on_frame(CaptureFrame(3, 1, resized.bgra.copy())) == ()
 
 
 def test_probe_serializes_evidence_without_probability_like_confidence_names() -> None:

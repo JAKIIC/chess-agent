@@ -13,7 +13,10 @@ from uuid import uuid4
 
 import numpy as np
 
-from xiangqi_agent.capture.adaptive_sampling import AdaptiveBurstSampler
+from xiangqi_agent.capture.adaptive_sampling import (
+    AdaptiveBurstSampler,
+    FrameSizeChangedError,
+)
 from xiangqi_agent.capture.context import CaptureContext
 from xiangqi_agent.capture.protocol import CaptureClosedError, CaptureFrame
 from xiangqi_agent.capture.windows_capture_source import WindowsCaptureSource
@@ -29,7 +32,11 @@ from xiangqi_agent.domain.notation import to_chinese
 from xiangqi_agent.platform.windows import WindowsWindowCatalog, select_window
 from xiangqi_agent.sync.evidence import MoveProposal
 from xiangqi_agent.sync.move_observer import LegalMoveDiffObserver
-from xiangqi_agent.sync.tracker import StableMoveTracker, TrackingStatus
+from xiangqi_agent.sync.tracker import (
+    StableMoveTracker,
+    TrackingStatus,
+    TrackingUpdate,
+)
 from xiangqi_agent.vision.change_detection import FrameStabilityDetector
 from xiangqi_agent.vision.geometry import BoardGeometry, parse_normalized_quad
 from xiangqi_agent.vision.templates import PieceTemplateBank
@@ -89,11 +96,51 @@ def main() -> int:
 
             deadline_ns = perf_counter_ns() + round(args.seconds * 1_000_000_000)
             while True:
-                samples = _next_adaptive_samples(
-                    events,
-                    sampler,
-                    deadline_ns=deadline_ns,
-                )
+                try:
+                    samples = _next_adaptive_samples(
+                        events,
+                        sampler,
+                        deadline_ns=deadline_ns,
+                    )
+                except FrameSizeChangedError as exc:
+                    resize_update = _rebind_after_resize(tracker, sampler, exc.frame)
+                    if resize_update.status is not TrackingStatus.WATCHING:
+                        print(
+                            json.dumps(
+                                {
+                                    "status": resize_update.status,
+                                    "message": (
+                                        "resized frame did not preserve the confirmed position; "
+                                        "manual recovery is required"
+                                    ),
+                                    "confirmed_position_id": resize_update.board.position_id,
+                                },
+                                ensure_ascii=False,
+                            ),
+                            flush=True,
+                        )
+                        return 5
+                    baseline = exc.frame
+                    geometry = tracker.geometry
+                    capture_context = _capture_context(
+                        baseline.size,
+                        baseline,
+                        geometry,
+                        board,
+                    )
+                    print(
+                        json.dumps(
+                            {
+                                "status": "RESIZE_REBOUND",
+                                "frame_size": baseline.size,
+                                "point_count": len(geometry.grid_points()),
+                                "confirmed_position_id": board.position_id,
+                            },
+                            ensure_ascii=False,
+                        ),
+                        flush=True,
+                    )
+                    continue
                 if samples is None:
                     break
                 for sample in samples:
@@ -158,6 +205,17 @@ def _set_sampling_mode(
         sampler.set_bursting(True)
     elif status is TrackingStatus.WATCHING:
         sampler.set_bursting(False)
+
+
+def _rebind_after_resize(
+    tracker: StableMoveTracker,
+    sampler: AdaptiveBurstSampler,
+    frame: CaptureFrame,
+) -> TrackingUpdate:
+    update = tracker.rebind_frame_size(frame.bgra)
+    if update.status is TrackingStatus.WATCHING:
+        sampler.initialize(frame)
+    return update
 
 
 def _stable_baseline(

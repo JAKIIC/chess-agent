@@ -27,17 +27,32 @@ def test_monitor_reports_first_valid_frame_and_ninety_points() -> None:
     assert updates[-1].point_count == 90
 
 
-def test_monitor_invalidates_calibration_on_frame_size_change() -> None:
+def test_monitor_rebinds_calibration_on_proportional_frame_size_change() -> None:
     source = FakeFrameSource(hwnd=42)
     updates = []
     monitor = CaptureMonitor(source, QUAD, on_update=updates.append)
     monitor.start()
     source.push(np.zeros((200, 300, 4), dtype=np.uint8), timestamp_ns=1)
 
-    source.push(np.zeros((220, 320, 4), dtype=np.uint8), timestamp_ns=2)
+    source.push(np.zeros((300, 450, 4), dtype=np.uint8), timestamp_ns=2)
+
+    assert updates[-1].status is MonitorStatus.GEOMETRY_REBOUND
+    assert updates[-1].frame_size == (450, 300)
+    assert updates[-1].point_count == 90
+    monitor.close()
+
+
+def test_monitor_invalidates_calibration_on_material_aspect_ratio_change() -> None:
+    source = FakeFrameSource(hwnd=42)
+    updates = []
+    monitor = CaptureMonitor(source, QUAD, on_update=updates.append)
+    monitor.start()
+    source.push(np.zeros((200, 300, 4), dtype=np.uint8), timestamp_ns=1)
+
+    source.push(np.zeros((200, 450, 4), dtype=np.uint8), timestamp_ns=2)
 
     assert updates[-1].status is MonitorStatus.GEOMETRY_INVALID
-    assert "size" in updates[-1].message.lower()
+    assert "aspect" in updates[-1].message.lower()
     monitor.close()
 
 

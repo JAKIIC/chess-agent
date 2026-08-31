@@ -10,6 +10,14 @@ _VISUAL_TRIGGER_THRESHOLD = 12
 _VISUAL_TRIGGER_STRIDE = 8
 
 
+class FrameSizeChangedError(ValueError):
+    """A capture callback changed size and must be explicitly rebound."""
+
+    def __init__(self, frame: CaptureFrame) -> None:
+        super().__init__("capture frame size changed during sampling")
+        self.frame = frame
+
+
 class AdaptiveBurstSampler:
     """Preserve quiet burst endpoints while keeping a low-rate steady clock."""
 
@@ -59,7 +67,7 @@ class AdaptiveBurstSampler:
         if frame.hwnd != latest.hwnd:
             raise ValueError("capture frame target changed during sampling")
         if frame.size != latest.size:
-            raise ValueError("capture frame size changed during sampling")
+            raise FrameSizeChangedError(frame)
 
         samples: tuple[CaptureFrame, ...] = ()
         quiet_gap = frame.timestamp_ns - latest.timestamp_ns >= self._settle_ns

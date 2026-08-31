@@ -98,6 +98,27 @@ class BoardGeometry:
         mapped = cv2.perspectiveTransform(np.array([logical], dtype=np.float32), transform)[0]
         return tuple((float(point[0]), float(point[1])) for point in mapped)
 
+    def rebind(
+        self,
+        frame_size: tuple[int, int],
+        *,
+        max_aspect_ratio_delta: float = 0.02,
+    ) -> BoardGeometry:
+        """Scale a normalized calibration to a proportionally resized frame."""
+        width, height = _validate_frame_size(frame_size)
+        if (
+            isinstance(max_aspect_ratio_delta, bool)
+            or not isfinite(max_aspect_ratio_delta)
+            or max_aspect_ratio_delta < 0.0
+        ):
+            raise GeometryError("aspect ratio tolerance must be a finite non-negative number")
+        old_width, old_height = self.frame_size
+        old_ratio = old_width / old_height
+        new_ratio = width / height
+        if abs(new_ratio / old_ratio - 1.0) > max_aspect_ratio_delta:
+            raise GeometryError("frame aspect ratio changed beyond safe rebind limit")
+        return BoardGeometry.from_quad(self.quad, frame_size, self.orientation)
+
     def crop_intersections(
         self,
         frame: NDArray[np.generic],

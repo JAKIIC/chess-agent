@@ -11,7 +11,8 @@ from xiangqi_agent.sync.committer import RuleStateCommitter, StateCommitter
 from xiangqi_agent.sync.evidence import MoveProposal, ObservationStatus
 from xiangqi_agent.sync.move_observer import MoveObserver
 from xiangqi_agent.vision.change_detection import analyze_frame_change
-from xiangqi_agent.vision.geometry import BoardGeometry
+from xiangqi_agent.vision.geometry import BoardGeometry, GeometryError
+from xiangqi_agent.vision.position_validation import validate_fixed_theme_position
 
 
 class TrackingStatus(StrEnum):
@@ -67,6 +68,10 @@ class StableMoveTracker:
     @property
     def board(self) -> BoardState:
         return self._board
+
+    @property
+    def geometry(self) -> BoardGeometry:
+        return self._geometry
 
     def initialize(self, frame: NDArray[np.generic]) -> TrackingUpdate:
         current = _owned_frame(frame)
@@ -161,6 +166,35 @@ class StableMoveTracker:
     def invalidate_context(self) -> TrackingUpdate:
         self._blocked_status = TrackingStatus.CONTEXT_INVALID
         return TrackingUpdate(TrackingStatus.CONTEXT_INVALID, self._board)
+
+    def rebind_frame_size(self, frame: NDArray[np.generic]) -> TrackingUpdate:
+        """Adopt a proportional resize only when the confirmed position is unchanged."""
+        if self._confirmed_frame is None or self._previous_frame is None:
+            raise RuntimeError("tracker must be initialized with a confirmed frame")
+        if self._blocked_status is not None:
+            return TrackingUpdate(self._blocked_status, self._board)
+        current = _owned_frame(frame)
+        frame_size = (int(current.shape[1]), int(current.shape[0]))
+        try:
+            rebound = self._geometry.rebind(frame_size)
+        except GeometryError:
+            return self.invalidate_context()
+        validation = validate_fixed_theme_position(
+            self._board,
+            self._confirmed_frame,
+            self._geometry,
+            current,
+            rebound,
+            patch_size=self._patch_size,
+        )
+        if not validation.accepted:
+            return self.invalidate_context()
+        self._geometry = rebound
+        self._confirmed_frame = current.copy()
+        self._previous_frame = current
+        self._motion_seen = False
+        self._stable_pairs = 0
+        return TrackingUpdate(TrackingStatus.WATCHING, self._board)
 
     def mark_desynchronized(self) -> TrackingUpdate:
         self._blocked_status = TrackingStatus.DESYNCHRONIZED

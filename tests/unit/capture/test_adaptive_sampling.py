@@ -1,7 +1,10 @@
 import numpy as np
 import pytest
 
-from xiangqi_agent.capture.adaptive_sampling import AdaptiveBurstSampler
+from xiangqi_agent.capture.adaptive_sampling import (
+    AdaptiveBurstSampler,
+    FrameSizeChangedError,
+)
 from xiangqi_agent.capture.protocol import CaptureFrame
 
 
@@ -148,8 +151,11 @@ def test_frame_size_change_is_rejected_before_buffered_samples_are_emitted() -> 
     sampler.initialize(_frame(0))
     sampler.on_frame(_frame(50_000_000, 10))
 
-    with pytest.raises(ValueError, match="size changed"):
-        sampler.on_frame(_frame(170_000_000, 20, shape=(3, 2)))
+    resized = _frame(170_000_000, 20, shape=(3, 2))
+    with pytest.raises(FrameSizeChangedError, match="size changed") as caught:
+        sampler.on_frame(resized)
+
+    assert caught.value.frame is resized
 
 
 @pytest.mark.parametrize(

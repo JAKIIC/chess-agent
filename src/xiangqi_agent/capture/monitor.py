@@ -7,12 +7,13 @@ from threading import Lock
 
 from xiangqi_agent.capture.protocol import CaptureClosedError, CaptureFrame, FrameSource
 from xiangqi_agent.domain.board import Orientation
-from xiangqi_agent.vision.geometry import BoardGeometry, NormalizedQuad
+from xiangqi_agent.vision.geometry import BoardGeometry, GeometryError, NormalizedQuad
 
 
 class MonitorStatus(StrEnum):
     CONNECTING = "connecting"
     WATCHING = "watching"
+    GEOMETRY_REBOUND = "geometry_rebound"
     GEOMETRY_INVALID = "geometry_invalid"
     CLOSED = "closed"
     ERROR = "error"
@@ -47,6 +48,7 @@ class CaptureMonitor:
         self._closed = False
         self._target_closed = False
         self._frame_size: tuple[int, int] | None = None
+        self._geometry: BoardGeometry | None = None
         self._geometry_invalid = False
 
     def start(self) -> None:
@@ -73,32 +75,44 @@ class CaptureMonitor:
         with self._lock:
             if self._closed or self._geometry_invalid:
                 return
-            expected_size = self._frame_size
-            if expected_size is not None and frame.size != expected_size:
-                self._geometry_invalid = True
-                invalid = True
-            else:
-                invalid = False
-                if expected_size is None:
+            geometry = self._geometry
+            if geometry is None:
+                geometry = BoardGeometry.from_quad(self._quad, frame.size, self._orientation)
+                self._geometry = geometry
+                self._frame_size = frame.size
+                status = MonitorStatus.WATCHING
+            elif frame.size != geometry.frame_size:
+                try:
+                    geometry = geometry.rebind(frame.size)
+                except GeometryError as exc:
+                    self._geometry_invalid = True
+                    error = str(exc)
+                    status = MonitorStatus.GEOMETRY_INVALID
+                else:
+                    self._geometry = geometry
                     self._frame_size = frame.size
-        if invalid:
+                    status = MonitorStatus.GEOMETRY_REBOUND
+            else:
+                return
+        if status is MonitorStatus.GEOMETRY_INVALID:
             self._emit(
                 CaptureMonitorUpdate(
                     MonitorStatus.GEOMETRY_INVALID,
-                    "frame size changed; manual calibration is no longer valid",
+                    error,
                     hwnd=frame.hwnd,
                     frame_size=frame.size,
                 )
             )
             return
-        if expected_size is not None:
-            return
-        geometry = BoardGeometry.from_quad(self._quad, frame.size, self._orientation)
         point_count = len(geometry.grid_points())
+        if status is MonitorStatus.GEOMETRY_REBOUND:
+            message = "frame size changed proportionally; normalized calibration was rebound"
+        else:
+            message = "visible capture is stable; automatic board commit remains disabled"
         self._emit(
             CaptureMonitorUpdate(
-                MonitorStatus.WATCHING,
-                "visible capture is stable; automatic board commit remains disabled",
+                status,
+                message,
                 hwnd=frame.hwnd,
                 frame_size=frame.size,
                 point_count=point_count,

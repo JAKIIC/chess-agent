@@ -30,6 +30,10 @@ def _render(board: BoardState) -> np.ndarray:
     return frame
 
 
+def _scale_two_times(frame: np.ndarray) -> np.ndarray:
+    return np.repeat(np.repeat(frame, 2, axis=0), 2, axis=1)
+
+
 def _move(board: BoardState, uci: str):
     return next(move for move in legal_moves(board) if move.uci == uci)
 
@@ -222,3 +226,40 @@ def test_manual_recovery_replaces_board_and_confirmed_frame() -> None:
     assert update.board == recovered_board
     assert tracker.board == after_recovery
     assert accepted.status is TrackingStatus.ACCEPTED
+
+
+def test_tracker_rebinds_a_proportionally_resized_confirmed_position() -> None:
+    board = parse_fen(START)
+    tracker = _tracker(board)
+    tracker.initialize(_render(board))
+
+    rebound = tracker.rebind_frame_size(_scale_two_times(_render(board)))
+
+    assert rebound.status is TrackingStatus.WATCHING
+    assert rebound.board == board
+    assert tracker.geometry.frame_size == (432, 480)
+
+    move = _move(board, "h2e2")
+    resized_after = _scale_two_times(_render(apply_move(board, move)))
+    tracker.push(resized_after)
+    tracker.push(resized_after.copy())
+    accepted = tracker.push(resized_after.copy())
+
+    assert accepted.status is TrackingStatus.ACCEPTED
+    assert accepted.move == move
+
+
+def test_tracker_rejects_resize_when_the_position_changed_at_the_same_time() -> None:
+    board = parse_fen(START)
+    move = _move(board, "h2e2")
+    tracker = _tracker(board)
+    tracker.initialize(_render(board))
+
+    invalid = tracker.rebind_frame_size(
+        _scale_two_times(_render(apply_move(board, move)))
+    )
+
+    assert invalid.status is TrackingStatus.CONTEXT_INVALID
+    assert invalid.board == board
+    assert tracker.board == board
+    assert tracker.geometry.frame_size == (216, 240)
