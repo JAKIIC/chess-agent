@@ -1,3 +1,4 @@
+import cv2
 import numpy as np
 import pytest
 
@@ -7,6 +8,7 @@ from xiangqi_agent.vision.templates import PieceTemplateBank, TemplateExtraction
 
 START = "rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w"
 CELL = 24
+THEMED_CELL = 48
 PALETTE = {symbol: index * 15 for index, symbol in enumerate(".KABNRCPkabnrcp", start=1)}
 
 
@@ -29,6 +31,56 @@ def _render(pieces: tuple[str, ...]) -> np.ndarray:
         row, column = divmod(index, 9)
         value = PALETTE[symbol]
         frame[row * CELL : (row + 1) * CELL, column * CELL : (column + 1) * CELL, :3] = value
+    return frame
+
+
+def _themed_geometry() -> BoardGeometry:
+    return BoardGeometry.from_quad(
+        NormalizedQuad.from_pixels(
+            (
+                (THEMED_CELL // 2, THEMED_CELL // 2),
+                (THEMED_CELL * 8 + THEMED_CELL // 2, THEMED_CELL // 2),
+                (THEMED_CELL * 8 + THEMED_CELL // 2, THEMED_CELL * 9 + THEMED_CELL // 2),
+                (THEMED_CELL // 2, THEMED_CELL * 9 + THEMED_CELL // 2),
+            ),
+            (THEMED_CELL * 9, THEMED_CELL * 10),
+        ),
+        (THEMED_CELL * 9, THEMED_CELL * 10),
+    )
+
+
+def _themed_patch(symbol: str, *, shift: tuple[int, int] = (0, 0), highlighted: bool = False) -> np.ndarray:
+    background = (157, 202, 236, 255)
+    patch = np.full((THEMED_CELL, THEMED_CELL, 4), background, dtype=np.uint8)
+    if symbol != ".":
+        cv2.circle(patch, (24, 24), 18, (143, 207, 254, 255), thickness=-1)
+        glyph = (40, 40, 170, 255) if symbol.isupper() else (45, 55, 60, 255)
+        cv2.rectangle(patch, (22, 14), (25, 33), glyph, thickness=-1)
+        cv2.rectangle(patch, (16, 22), (31, 25), glyph, thickness=-1)
+    dx, dy = shift
+    if dx or dy:
+        matrix = np.asarray(((1.0, 0.0, float(dx)), (0.0, 1.0, float(dy))), dtype=np.float32)
+        patch = cv2.warpAffine(
+            patch,
+            matrix,
+            (THEMED_CELL, THEMED_CELL),
+            flags=cv2.INTER_LINEAR,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=background,
+        )
+    if highlighted:
+        cv2.circle(patch, (24, 24), 21, (105, 140, 155, 255), thickness=2)
+    return np.asarray(patch, dtype=np.uint8)
+
+
+def _themed_frame(pieces: tuple[str, ...]) -> np.ndarray:
+    frame = np.empty((THEMED_CELL * 10, THEMED_CELL * 9, 4), dtype=np.uint8)
+    for index, symbol in enumerate(pieces):
+        row, column = divmod(index, 9)
+        frame[
+            row * THEMED_CELL : (row + 1) * THEMED_CELL,
+            column * THEMED_CELL : (column + 1) * THEMED_CELL,
+        ] = _themed_patch(symbol)
     return frame
 
 
@@ -67,8 +119,26 @@ def test_template_group_match_accepts_any_piece_from_the_expected_side() -> None
 
     assert match.expected_symbol == "P"
     assert match.distance == pytest.approx(0.0)
-    assert match.margin == pytest.approx(15 / 255)
+    assert match.margin > 0.02
     assert match.confidence > 0.99
+
+
+@pytest.mark.parametrize("symbol", ["K", "k"])
+def test_template_group_survives_piece_shift_and_selection_highlight(symbol: str) -> None:
+    board = parse_fen("4k4/9/9/9/9/9/9/9/9/4K4 w")
+    templates = PieceTemplateBank.from_position(
+        board,
+        _themed_geometry(),
+        _themed_frame(board.pieces),
+        patch_size=THEMED_CELL,
+    )
+
+    match = templates.match_any(frozenset({symbol}), _themed_patch(symbol, shift=(4, 3), highlighted=True))
+
+    assert match.expected_symbol == symbol
+    assert match.distance < 0.18
+    assert match.margin >= 0.02
+    assert match.confidence >= 0.8
 
 
 def test_template_group_confidence_is_independent_of_same_side_class_count() -> None:

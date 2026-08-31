@@ -17,6 +17,7 @@ from xiangqi_agent.vision.geometry import BoardGeometry
 class TrackingStatus(StrEnum):
     WATCHING = "watching"
     WAITING_FOR_STABLE = "waiting_for_stable"
+    WAITING_FOR_ENDPOINT = "waiting_for_endpoint"
     ACCEPTED = "accepted"
     PAUSED_AMBIGUOUS = "paused_ambiguous"
     CONTEXT_INVALID = "context_invalid"
@@ -138,6 +139,14 @@ class StableMoveTracker:
             self._motion_seen = False
             self._stable_pairs = 0
             return TrackingUpdate(TrackingStatus.WATCHING, self._board)
+        if _is_incomplete_endpoint_transition(observation):
+            self._motion_seen = True
+            self._stable_pairs = 0
+            return TrackingUpdate(
+                TrackingStatus.WAITING_FOR_ENDPOINT,
+                self._board,
+                observation=observation,
+            )
 
         return self._pause(observation)
 
@@ -179,3 +188,10 @@ def _owned_frame(frame: NDArray[np.generic]) -> NDArray[np.uint8]:
     if pixels.dtype != np.uint8 or pixels.ndim != 3 or pixels.shape[2] != 4:
         raise ValueError("frame must be a BGRA uint8 image")
     return np.array(pixels, dtype=np.uint8, copy=True, order="C")
+
+
+def _is_incomplete_endpoint_transition(observation: MoveProposal) -> bool:
+    reasons = frozenset(observation.evidence.rejection_reasons)
+    source_missing = "source_change" in reasons
+    destination_missing = "destination_change" in reasons
+    return source_missing != destination_missing

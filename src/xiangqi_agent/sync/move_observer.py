@@ -82,6 +82,8 @@ class LegalMoveDiffObserver:
         self._min_score = min_score
         self._min_margin = min_margin
         self._min_evidence_score = min_evidence_score
+        self._max_semantic_distance = max_semantic_distance
+        self._min_semantic_margin = min_semantic_margin
         self._feature_extractor = feature_extractor or InstanceTransferExtractor()
         self._semantic_gate = MoveSemanticGate(
             SemanticThresholds(
@@ -119,10 +121,27 @@ class LegalMoveDiffObserver:
             before,
             patch_size=self._patch_size,
         )
+        semantically_unchanged = _semantic_unchanged_mask(
+            board,
+            local,
+            after_patches,
+            templates,
+            min_visual_difference=self._max_unexpected_difference,
+            max_semantic_distance=self._max_semantic_distance,
+            min_semantic_margin=self._min_semantic_margin,
+            min_semantic_evidence_score=self._min_evidence_score,
+        )
         candidates = tuple(
             sorted(
                 (
-                    _score_candidate(board, move, local, after_patches, templates)
+                    _score_candidate(
+                        board,
+                        move,
+                        local,
+                        after_patches,
+                        templates,
+                        semantically_unchanged,
+                    )
                     for move in legal_moves(board)
                 ),
                 key=lambda candidate: (-candidate.score, candidate.move.uci),
@@ -201,12 +220,17 @@ def _score_candidate(
     local: tuple[float, ...],
     after_patches: tuple[NDArray[np.uint8], ...],
     templates: PieceTemplateBank,
+    semantically_unchanged: tuple[bool, ...],
 ) -> CandidateEvidence:
     source = local[move.from_index]
     destination = local[move.to_index]
     excluded = {move.from_index, move.to_index}
     unexpected = max(
-        (difference for index, difference in enumerate(local) if index not in excluded),
+        (
+            difference
+            for index, difference in enumerate(local)
+            if index not in excluded and not semantically_unchanged[index]
+        ),
         default=0.0,
     )
     source_match = templates.match_any(frozenset({"."}), after_patches[move.from_index])
@@ -232,6 +256,41 @@ def _score_candidate(
         destination_semantic_evidence_score=destination_match.confidence,
         score=min(source, destination) - unexpected,
     )
+
+
+def _semantic_unchanged_mask(
+    board: BoardState,
+    local: tuple[float, ...],
+    after_patches: tuple[NDArray[np.uint8], ...],
+    templates: PieceTemplateBank,
+    *,
+    min_visual_difference: float,
+    max_semantic_distance: float,
+    min_semantic_margin: float,
+    min_semantic_evidence_score: float,
+) -> tuple[bool, ...]:
+    unchanged: list[bool] = []
+    for index, (difference, patch) in enumerate(zip(local, after_patches, strict=True)):
+        if difference <= min_visual_difference:
+            unchanged.append(True)
+            continue
+        expected_symbol = board.pieces[index]
+        expected_symbols = (
+            frozenset({"."})
+            if expected_symbol == "."
+            else frozenset(
+                symbol
+                for symbol in templates.symbols
+                if symbol != "." and symbol.isupper() == expected_symbol.isupper()
+            )
+        )
+        match = templates.match_any(expected_symbols, patch)
+        unchanged.append(
+            match.distance <= max_semantic_distance
+            and match.margin >= min_semantic_margin
+            and match.confidence >= min_semantic_evidence_score
+        )
+    return tuple(unchanged)
 
 
 def _ambiguous(

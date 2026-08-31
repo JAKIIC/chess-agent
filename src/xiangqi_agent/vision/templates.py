@@ -10,6 +10,8 @@ from numpy.typing import NDArray
 from xiangqi_agent.domain.board import VALID_PIECES, BoardState
 from xiangqi_agent.vision.geometry import BoardGeometry
 
+_REDNESS_DISTANCE_WEIGHT = 0.1
+
 
 class TemplateExtractionError(ValueError):
     """The confirmed position cannot seed a complete fixed-theme template bank."""
@@ -27,7 +29,7 @@ class TemplateMatch:
 class PieceTemplateBank:
     """In-memory visual examples extracted from one confirmed fixed-theme board."""
 
-    _examples: dict[str, tuple[NDArray[np.float32], ...]]
+    _examples: dict[str, tuple[_TemplateFeature, ...]]
 
     @classmethod
     def from_position(
@@ -46,7 +48,9 @@ class PieceTemplateBank:
                 "the confirmed position must contain all 15 fixed-theme classes"
             )
 
-        grouped: dict[str, list[NDArray[np.float32]]] = {symbol: [] for symbol in sorted(present)}
+        grouped: dict[str, list[_TemplateFeature]] = {
+            symbol: [] for symbol in sorted(present)
+        }
         for symbol, patch in zip(board.pieces, patches, strict=True):
             grouped[symbol].append(_feature(patch))
         return cls({symbol: tuple(examples) for symbol, examples in grouped.items()})
@@ -61,8 +65,6 @@ class PieceTemplateBank:
     def distance(self, symbol: str, patch: NDArray[np.generic]) -> float:
         examples = self._examples[_validate_symbol(symbol, self._examples)]
         candidate = _feature(patch)
-        if candidate.shape != examples[0].shape:
-            raise ValueError("template patch shape differs from the extracted theme")
         return _minimum_distance(examples, candidate)
 
     def match(self, expected_symbol: str, patch: NDArray[np.generic]) -> TemplateMatch:
@@ -125,16 +127,41 @@ def _semantic_group(symbol: str) -> str:
     return "red" if symbol.isupper() else "black"
 
 
-def _feature(patch: NDArray[np.generic]) -> NDArray[np.float32]:
+@dataclass(frozen=True, slots=True)
+class _TemplateFeature:
+    ordered_colors: NDArray[np.float32]
+    redness: float
+
+
+def _feature(patch: NDArray[np.generic]) -> _TemplateFeature:
     pixels = np.asarray(patch)
     if pixels.dtype != np.uint8 or pixels.ndim != 3 or pixels.shape[2] != 4:
         raise ValueError("template patch must be a BGRA uint8 image")
-    return np.asarray(pixels[..., :3], dtype=np.float32) / np.float32(255.0)
+    colors = np.asarray(pixels[..., :3], dtype=np.float32).reshape(-1, 3)
+    order = np.lexsort((colors[:, 2], colors[:, 1], colors[:, 0]))
+    ordered_colors = colors[order].reshape(-1)
+    red_excess = np.maximum(
+        colors[:, 2] - np.maximum(colors[:, 0], colors[:, 1]),
+        np.float32(0.0),
+    )
+    sample_count = max(1, red_excess.size // 10)
+    strongest_red = np.partition(red_excess, red_excess.size - sample_count)[-sample_count:]
+    return _TemplateFeature(
+        ordered_colors=np.asarray(
+            ordered_colors / np.float32(255.0),
+            dtype=np.float32,
+        ),
+        redness=float(strongest_red.mean() / np.float32(255.0)),
+    )
 
 
 def _minimum_distance(
-    examples: tuple[NDArray[np.float32], ...], candidate: NDArray[np.float32]
+    examples: tuple[_TemplateFeature, ...], candidate: _TemplateFeature
 ) -> float:
-    if candidate.shape != examples[0].shape:
-        raise ValueError("template patch shape differs from the extracted theme")
-    return min(float(np.abs(example - candidate).mean()) for example in examples)
+    if candidate.ordered_colors.shape != examples[0].ordered_colors.shape:
+        raise ValueError("template feature shape differs from the extracted theme")
+    return min(
+        float(np.abs(example.ordered_colors - candidate.ordered_colors).mean())
+        + _REDNESS_DISTANCE_WEIGHT * abs(example.redness - candidate.redness)
+        for example in examples
+    )

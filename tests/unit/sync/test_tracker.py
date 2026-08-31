@@ -85,6 +85,45 @@ def test_tracker_keeps_last_confirmed_board_when_change_is_ambiguous() -> None:
     assert still_paused.board == board
 
 
+def test_tracker_keeps_watching_after_selection_highlight_then_accepts_move() -> None:
+    board = parse_fen(START)
+    move = _move(board, "h2e2")
+    baseline = _render(board)
+    selected = baseline.copy()
+    source_row, source_column = divmod(move.from_index, 9)
+    selected[
+        source_row * CELL : (source_row + 1) * CELL,
+        source_column * CELL : (source_column + 1) * CELL,
+        :3,
+    ] = np.clip(
+        selected[
+            source_row * CELL : (source_row + 1) * CELL,
+            source_column * CELL : (source_column + 1) * CELL,
+            :3,
+        ].astype(np.int16)
+        + 60,
+        0,
+        255,
+    ).astype(np.uint8)
+    tracker = _tracker(board)
+    tracker.initialize(baseline)
+
+    tracker.push(selected)
+    tracker.push(selected.copy())
+    selection = tracker.push(selected.copy())
+
+    assert selection.status.value == "waiting_for_endpoint"
+    assert selection.board == board
+
+    after = _render(apply_move(board, move))
+    tracker.push(after)
+    tracker.push(after.copy())
+    accepted = tracker.push(after.copy())
+
+    assert accepted.status is TrackingStatus.ACCEPTED
+    assert accepted.move == move
+
+
 def test_tracker_returns_to_watching_when_transient_change_restores_baseline() -> None:
     board = parse_fen(START)
     baseline = _render(board)

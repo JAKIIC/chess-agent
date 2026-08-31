@@ -20,6 +20,7 @@ from xiangqi_agent.sync.evidence import (
     MoveProposal,
     ObservationStatus,
 )
+from xiangqi_agent.sync.tracker import TrackingStatus
 from xiangqi_agent.vision.endpoint_features import EndpointFeatures
 
 
@@ -241,6 +242,15 @@ def test_probe_defaults_to_high_rate_capture_with_two_fps_steady_logic(
     assert args.capture_fps == 20
     assert args.settle_ms == 100
     assert not args.record_endpoints
+
+
+def test_probe_keeps_burst_sampling_while_waiting_for_the_second_endpoint() -> None:
+    sampler = AdaptiveBurstSampler(steady_fps=2, settle_ms=100, stable_repeats=2)
+    sampler.initialize(_frame())
+
+    probe._set_sampling_mode(sampler, TrackingStatus.WAITING_FOR_ENDPOINT)
+
+    assert sampler.bursting
 
 
 def test_probe_serializes_evidence_without_probability_like_confidence_names() -> None:

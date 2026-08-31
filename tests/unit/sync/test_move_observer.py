@@ -166,6 +166,31 @@ def test_observer_accepts_same_side_piece_appearance_variation_at_destination() 
     assert not hasattr(result, "after")
 
 
+def test_observer_ignores_cosmetic_highlight_clearing_outside_move_endpoints() -> None:
+    board = parse_fen(START)
+    move = _move(board, "h2e2")
+    before = _render(board)
+    highlighted_index = 54
+    row, column = divmod(highlighted_index, 9)
+    highlighted = before[
+        row * CELL : (row + 1) * CELL,
+        column * CELL : (column + 1) * CELL,
+        :3,
+    ]
+    highlighted[:] = np.clip(highlighted.astype(np.int16) + 60, 0, 255).astype(np.uint8)
+
+    result = LegalMoveDiffObserver(patch_size=CELL).observe(
+        board,
+        before,
+        _render(apply_move(board, move)),
+        _geometry(),
+    )
+
+    assert result.status is ObservationStatus.ACCEPTED
+    assert result.move == move
+    assert result.evidence.candidates[0].unexpected_difference == pytest.approx(0.0)
+
+
 def test_observer_rejects_when_instance_transfer_is_the_only_failed_hard_gate() -> None:
     board = parse_fen(START)
     move = _move(board, "h2e2")

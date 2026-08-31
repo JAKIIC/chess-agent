@@ -35,7 +35,7 @@ from xiangqi_agent.vision.geometry import BoardGeometry, parse_normalized_quad
 from xiangqi_agent.vision.templates import PieceTemplateBank
 
 START_FEN = "rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w"
-THRESHOLD_PROFILE_VERSION = "live-strict-v2"
+THRESHOLD_PROFILE_VERSION = "live-strict-v3"
 
 
 def main() -> int:
@@ -98,10 +98,7 @@ def main() -> int:
                     break
                 for sample in samples:
                     update = tracker.push(sample.bgra)
-                    if update.status is TrackingStatus.WAITING_FOR_STABLE:
-                        sampler.set_bursting(True)
-                    elif update.status is TrackingStatus.WATCHING:
-                        sampler.set_bursting(False)
+                    _set_sampling_mode(sampler, update.status)
                     if update.status not in (
                         TrackingStatus.ACCEPTED,
                         TrackingStatus.PAUSED_AMBIGUOUS,
@@ -148,6 +145,19 @@ def main() -> int:
             flush=True,
         )
         return 2
+
+
+def _set_sampling_mode(
+    sampler: AdaptiveBurstSampler,
+    status: TrackingStatus,
+) -> None:
+    if status in (
+        TrackingStatus.WAITING_FOR_STABLE,
+        TrackingStatus.WAITING_FOR_ENDPOINT,
+    ):
+        sampler.set_bursting(True)
+    elif status is TrackingStatus.WATCHING:
+        sampler.set_bursting(False)
 
 
 def _stable_baseline(
