@@ -22,7 +22,7 @@ from xiangqi_agent.capture.monitor import (
     MonitorStatus,
 )
 from xiangqi_agent.capture.protocol import FrameSource
-from xiangqi_agent.capture.windows_capture_source import WindowsCaptureSource
+from xiangqi_agent.capture.visible_window_source import VisibleWindowCaptureSource
 from xiangqi_agent.domain.board import BoardState, Orientation
 from xiangqi_agent.platform.windows import WindowInfo, WindowsWindowCatalog
 from xiangqi_agent.sync.live_session import (
@@ -320,7 +320,7 @@ class CapturePanel(QWidget):
 
 
 def _default_source_factory(window: WindowInfo) -> FrameSource:
-    return WindowsCaptureSource(window, fps=20)
+    return VisibleWindowCaptureSource(window, fps=2, burst_fps=20)
 
 
 def _window_label(window: WindowInfo) -> str:

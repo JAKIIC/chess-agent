@@ -6,12 +6,13 @@ import numpy as np
 from PySide6.QtCore import Qt
 
 from xiangqi_agent.capture.fake import FakeFrameSource
+from xiangqi_agent.capture.visible_window_source import VisibleWindowCaptureSource
 from xiangqi_agent.domain.board import BoardState
 from xiangqi_agent.domain.fen import parse_fen
 from xiangqi_agent.domain.rules import apply_move, legal_moves
 from xiangqi_agent.platform.windows import WindowInfo
 from xiangqi_agent.sync.live_session import LiveSyncStatus
-from xiangqi_agent.ui.capture_panel import CapturePanel
+from xiangqi_agent.ui.capture_panel import CapturePanel, _default_source_factory
 
 START = "rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w"
 CELL = 24
@@ -25,6 +26,16 @@ class FakeCatalog:
 
     def list_candidates(self) -> tuple[WindowInfo, ...]:
         return self.windows
+
+
+def test_default_capture_backend_reads_the_visible_wechat_window() -> None:
+    window = WindowInfo(42, "天天象棋", "WeChatAppEx.exe", (300, 200))
+
+    source = _default_source_factory(window)
+
+    assert isinstance(source, VisibleWindowCaptureSource)
+    assert source.fps == 2
+    assert source.burst_fps == 20
 
 
 def _render(board: BoardState) -> np.ndarray:

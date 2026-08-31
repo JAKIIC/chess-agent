@@ -1,6 +1,6 @@
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 import numpy as np
 from numpy.typing import NDArray
@@ -45,3 +45,10 @@ class FrameSource(Protocol):
     ) -> None: ...
 
     def close(self) -> None: ...
+
+
+@runtime_checkable
+class BurstFrameSource(FrameSource, Protocol):
+    """Optional extension for sources that can temporarily capture faster."""
+
+    def set_bursting(self, active: bool) -> None: ...

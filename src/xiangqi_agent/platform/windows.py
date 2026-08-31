@@ -27,10 +27,9 @@ def filter_target_windows(windows: tuple[WindowInfo, ...]) -> tuple[WindowInfo, 
         for item in windows
         if item.hwnd > 0
         and not item.is_minimized
-        and bool(item.title.strip())
+        and item.title.strip() == "天天象棋"
         and item.client_size[0] > 0
         and item.client_size[1] > 0
-        and "天天象棋" in item.title
     )
     return tuple(filtered)
 

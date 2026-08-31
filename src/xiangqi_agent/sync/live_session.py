@@ -12,7 +12,12 @@ from xiangqi_agent.capture.adaptive_sampling import (
     AdaptiveBurstSampler,
     FrameSizeChangedError,
 )
-from xiangqi_agent.capture.protocol import CaptureClosedError, CaptureFrame, FrameSource
+from xiangqi_agent.capture.protocol import (
+    BurstFrameSource,
+    CaptureClosedError,
+    CaptureFrame,
+    FrameSource,
+)
 from xiangqi_agent.domain.board import BoardState, Move
 from xiangqi_agent.sync.evidence import MoveProposal
 from xiangqi_agent.sync.move_observer import LegalMoveDiffObserver
@@ -362,7 +367,7 @@ class LiveSyncSession:
         for sample in samples:
             before_position_id = tracker.board.position_id
             update = tracker.push(sample.bgra)
-            _set_sampling_mode(sampler, update.status)
+            _set_sampling_mode(sampler, self._source, update.status)
             if update.status is TrackingStatus.ACCEPTED:
                 with self._lock:
                     self._board = update.board
@@ -537,14 +542,18 @@ class LiveSyncSession:
             )
 
 
-def _set_sampling_mode(sampler: AdaptiveBurstSampler, status: TrackingStatus) -> None:
-    if status in (
+def _set_sampling_mode(
+    sampler: AdaptiveBurstSampler,
+    source: FrameSource,
+    status: TrackingStatus,
+) -> None:
+    active = status in (
         TrackingStatus.WAITING_FOR_STABLE,
         TrackingStatus.WAITING_FOR_ENDPOINT,
-    ):
-        sampler.set_bursting(True)
-    elif status in (TrackingStatus.WATCHING, TrackingStatus.ACCEPTED):
-        sampler.set_bursting(False)
+    )
+    sampler.set_bursting(active)
+    if isinstance(source, BurstFrameSource):
+        source.set_bursting(active)
 
 
 def _queue_timeout(sampler: AdaptiveBurstSampler | None) -> float:

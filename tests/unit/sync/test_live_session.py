@@ -63,6 +63,15 @@ class _ThrowingCloseSource(FakeFrameSource):
         raise RuntimeError("close failed")
 
 
+class _BurstAwareFakeSource(FakeFrameSource):
+    def __init__(self, hwnd: int) -> None:
+        super().__init__(hwnd)
+        self.burst_modes: list[bool] = []
+
+    def set_bursting(self, active: bool) -> None:
+        self.burst_modes.append(active)
+
+
 class _RecoveryFirstLock:
     def __init__(self) -> None:
         self.worker_waiting = Event()
@@ -138,6 +147,39 @@ def test_live_session_tracks_multiple_unique_moves_without_restarting() -> None:
     assert session.board == after_black
 
     session.close()
+    session.close()
+
+
+def test_live_session_requests_burst_capture_only_while_a_move_is_settling() -> None:
+    board = parse_fen(START)
+    move = _move(board, "h2e2")
+    after = apply_move(board, move)
+    source = _BurstAwareFakeSource(hwnd=42)
+    updates = []
+    session = LiveSyncSession(
+        source,
+        board,
+        QUAD,
+        on_update=updates.append,
+        patch_size=CELL,
+        settle_ms=100,
+        stable_pairs=2,
+    )
+
+    session.start()
+    baseline = _render(board)
+    source.push(baseline, 0)
+    source.push(baseline.copy(), 50_000_000)
+    source.push(baseline.copy(), 100_000_000)
+    _wait_until(lambda: any(update.status is LiveSyncStatus.BASELINE_READY for update in updates))
+
+    moved = _render(after)
+    source.push(moved, 150_000_000)
+    _wait_until(lambda: True in source.burst_modes)
+    source.push(moved.copy(), 260_000_000)
+    _wait_until(lambda: any(update.status is LiveSyncStatus.MOVE_ACCEPTED for update in updates))
+
+    assert source.burst_modes[-1] is False
     session.close()
 
 

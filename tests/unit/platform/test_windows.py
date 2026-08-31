@@ -16,6 +16,7 @@ def test_filter_target_windows_keeps_only_visible_named_target() -> None:
         WindowInfo(4, "记事本", "notepad.exe", (800, 600)),
         WindowInfo(5, "微信", "Weixin.exe", (0, 0)),
         WindowInfo(6, "天天象棋", "WeChatAppEx.exe", (800, 900), is_minimized=True),
+        WindowInfo(7, "天天象棋学习助手", "python.exe", (1180, 760)),
     )
 
     assert [item.hwnd for item in filter_target_windows(windows)] == [2]
