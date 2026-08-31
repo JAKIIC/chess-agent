@@ -8,7 +8,7 @@ from xiangqi_agent.platform.windows import (
 )
 
 
-def test_filter_target_windows_keeps_visible_wechat_or_named_target() -> None:
+def test_filter_target_windows_keeps_only_visible_named_target() -> None:
     windows = (
         WindowInfo(1, "微信", "Weixin.exe", (900, 1200)),
         WindowInfo(2, "天天象棋", "host.exe", (800, 900)),
@@ -18,7 +18,7 @@ def test_filter_target_windows_keeps_visible_wechat_or_named_target() -> None:
         WindowInfo(6, "天天象棋", "WeChatAppEx.exe", (800, 900), is_minimized=True),
     )
 
-    assert [item.hwnd for item in filter_target_windows(windows)] == [1, 2]
+    assert [item.hwnd for item in filter_target_windows(windows)] == [2]
 
 
 def test_manual_selection_requires_a_real_candidate() -> None:

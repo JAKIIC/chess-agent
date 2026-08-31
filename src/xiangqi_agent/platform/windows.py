@@ -22,7 +22,6 @@ class WindowInfo:
 
 
 def filter_target_windows(windows: tuple[WindowInfo, ...]) -> tuple[WindowInfo, ...]:
-    process_markers = ("weixin", "wechat", "xwechat")
     filtered = (
         item
         for item in windows
@@ -31,10 +30,7 @@ def filter_target_windows(windows: tuple[WindowInfo, ...]) -> tuple[WindowInfo, 
         and bool(item.title.strip())
         and item.client_size[0] > 0
         and item.client_size[1] > 0
-        and (
-            any(marker in item.process_name.casefold() for marker in process_markers)
-            or "天天象棋" in item.title
-        )
+        and "天天象棋" in item.title
     )
     return tuple(filtered)
 
