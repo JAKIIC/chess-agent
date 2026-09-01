@@ -4,14 +4,18 @@ import pytest
 from xiangqi_agent.domain.board import BoardState
 from xiangqi_agent.domain.fen import parse_fen
 from xiangqi_agent.domain.rules import apply_move, legal_moves
+from xiangqi_agent.sync.committer import RuleStateCommitter
 from xiangqi_agent.sync.evidence import (
     MoveEvidence,
     MoveProposal,
     MoveSequenceEvidence,
     MoveSequenceProposal,
     ObservationStatus,
+    SequenceCandidateEvidence,
 )
+from xiangqi_agent.sync.mode import SyncMode
 from xiangqi_agent.sync.move_observer import LegalMoveDiffObserver
+from xiangqi_agent.sync.sequence_observer import LegalTwoPlyDiffObserver
 from xiangqi_agent.sync.tracker import StableMoveTracker, TrackingStatus
 from xiangqi_agent.vision.geometry import BoardGeometry, NormalizedQuad
 
@@ -45,14 +49,29 @@ def _move(board: BoardState, uci: str):
     return next(move for move in legal_moves(board) if move.uci == uci)
 
 
-def _tracker(board: BoardState) -> StableMoveTracker:
+def _tracker(
+    board: BoardState,
+    *,
+    mode: SyncMode = SyncMode.STRICT_SINGLE,
+    sequence_observer: object | None = None,
+    committer: object | None = None,
+) -> StableMoveTracker:
     return StableMoveTracker(
         board,
         _geometry(),
         LegalMoveDiffObserver(patch_size=CELL),
+        committer=committer,
+        mode=mode,
+        sequence_observer=sequence_observer,
         required_stable_pairs=2,
         patch_size=CELL,
     )
+
+
+def _settle(tracker: StableMoveTracker, frame: np.ndarray):
+    tracker.push(frame)
+    tracker.push(frame.copy())
+    return tracker.push(frame.copy())
 
 
 def test_sequence_proposal_requires_exactly_two_moves_when_accepted() -> None:
@@ -82,6 +101,148 @@ def test_sequence_proposal_rejects_moves_on_ambiguous_result() -> None:
                 "two-ply-v1",
             ),
         )
+
+
+def test_strict_tracker_never_invokes_two_ply_observer() -> None:
+    board = parse_fen(START)
+    first = _move(board, "h2e2")
+    middle = apply_move(board, first)
+    second = _move(middle, "h7e7")
+    final = apply_move(middle, second)
+
+    class RecordingSequenceObserver:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def observe(self, *_args: object) -> MoveSequenceProposal:
+            self.calls += 1
+            return MoveSequenceProposal(
+                status=ObservationStatus.ACCEPTED,
+                moves=(first, second),
+                evidence_score=1.0,
+                evidence=MoveSequenceEvidence((), (), (), "two-ply-v1"),
+            )
+
+    sequence = RecordingSequenceObserver()
+    tracker = _tracker(board, sequence_observer=sequence)
+    tracker.initialize(_render(board))
+
+    result = _settle(tracker, _render(final))
+
+    assert result.status is TrackingStatus.PAUSED_AMBIGUOUS
+    assert sequence.calls == 0
+    assert result.board == board
+
+
+def test_human_ai_tracker_atomically_accepts_unique_two_ply_fallback() -> None:
+    board = parse_fen(START)
+    first = _move(board, "h2e2")
+    middle = apply_move(board, first)
+    second = _move(middle, "h7e7")
+    final = apply_move(middle, second)
+    tracker = _tracker(
+        board,
+        mode=SyncMode.HUMAN_VS_AI,
+        sequence_observer=LegalTwoPlyDiffObserver(patch_size=CELL),
+    )
+    tracker.initialize(_render(board))
+
+    result = _settle(tracker, _render(final))
+
+    assert result.status is TrackingStatus.ACCEPTED
+    assert result.moves == (first, second)
+    assert result.move is None
+    assert result.board == final
+
+
+def test_human_ai_tracker_rejects_sequence_whose_evidence_final_id_is_wrong() -> None:
+    board = parse_fen(START)
+    first = _move(board, "h2e2")
+    middle = apply_move(board, first)
+    second = _move(middle, "h7e7")
+    final = apply_move(middle, second)
+    candidate = SequenceCandidateEvidence(
+        moves=(first, second),
+        changed_points=(19, 22, 64, 67),
+        expected_change_floor=90.0,
+        unexpected_difference=0.0,
+        maximum_template_distance=0.0,
+        minimum_template_margin=1.0,
+        minimum_template_confidence=1.0,
+        score=90.0,
+        final_position_id="0" * 32,
+    )
+
+    class WrongEvidenceObserver:
+        def observe(self, *_args: object) -> MoveSequenceProposal:
+            return MoveSequenceProposal(
+                status=ObservationStatus.ACCEPTED,
+                moves=(first, second),
+                evidence_score=1.0,
+                evidence=MoveSequenceEvidence(
+                    (candidate,),
+                    (),
+                    (),
+                    "two-ply-v1",
+                ),
+            )
+
+    tracker = _tracker(
+        board,
+        mode=SyncMode.HUMAN_VS_AI,
+        sequence_observer=WrongEvidenceObserver(),
+    )
+    tracker.initialize(_render(board))
+
+    result = _settle(tracker, _render(final))
+
+    assert result.status is TrackingStatus.PAUSED_AMBIGUOUS
+    assert result.moves == ()
+    assert result.board == board
+
+
+def test_human_ai_tracker_does_not_publish_first_move_when_atomic_commit_fails() -> None:
+    board = parse_fen(START)
+    first = _move(board, "h2e2")
+    middle = apply_move(board, first)
+    second = _move(middle, "h7e7")
+    final = apply_move(middle, second)
+
+    class FailingSequenceCommitter(RuleStateCommitter):
+        def commit_sequence(self, *_args: object) -> BoardState:
+            raise ValueError("second move failed")
+
+    tracker = _tracker(
+        board,
+        mode=SyncMode.HUMAN_VS_AI,
+        sequence_observer=LegalTwoPlyDiffObserver(patch_size=CELL),
+        committer=FailingSequenceCommitter(),
+    )
+    tracker.initialize(_render(board))
+
+    result = _settle(tracker, _render(final))
+
+    assert result.status is TrackingStatus.PAUSED_AMBIGUOUS
+    assert result.moves == ()
+    assert result.board == board
+    assert tracker.board == board
+
+
+def test_human_ai_tracker_keeps_two_single_events_when_a_stable_platform_exists() -> None:
+    board = parse_fen(START)
+    first = _move(board, "h2e2")
+    middle = apply_move(board, first)
+    second = _move(middle, "h7e7")
+    final = apply_move(middle, second)
+    tracker = _tracker(board, mode=SyncMode.HUMAN_VS_AI)
+    tracker.initialize(_render(board))
+
+    first_update = _settle(tracker, _render(middle))
+    second_update = _settle(tracker, _render(final))
+
+    assert first_update.moves == (first,)
+    assert second_update.moves == (second,)
+    assert second_update.board == final
 
 
 def test_tracker_waits_for_animation_to_end_before_accepting_move() -> None:

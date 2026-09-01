@@ -8,8 +8,17 @@ from numpy.typing import NDArray
 
 from xiangqi_agent.domain.board import BoardState, Move
 from xiangqi_agent.sync.committer import RuleStateCommitter, StateCommitter
-from xiangqi_agent.sync.evidence import MoveProposal, ObservationStatus
+from xiangqi_agent.sync.evidence import (
+    MoveProposal,
+    MoveSequenceProposal,
+    ObservationStatus,
+)
+from xiangqi_agent.sync.mode import SyncMode
 from xiangqi_agent.sync.move_observer import MoveObserver
+from xiangqi_agent.sync.sequence_observer import (
+    LegalTwoPlyDiffObserver,
+    MoveSequenceObserver,
+)
 from xiangqi_agent.vision.change_detection import analyze_frame_change
 from xiangqi_agent.vision.geometry import BoardGeometry, GeometryError
 from xiangqi_agent.vision.position_validation import validate_fixed_theme_position
@@ -30,8 +39,12 @@ class TrackingStatus(StrEnum):
 class TrackingUpdate:
     status: TrackingStatus
     board: BoardState
-    move: Move | None = None
-    observation: MoveProposal | None = None
+    moves: tuple[Move, ...] = ()
+    observation: MoveProposal | MoveSequenceProposal | None = None
+
+    @property
+    def move(self) -> Move | None:
+        return self.moves[0] if len(self.moves) == 1 else None
 
 
 class StableMoveTracker:
@@ -44,6 +57,8 @@ class StableMoveTracker:
         observer: MoveObserver,
         committer: StateCommitter | None = None,
         *,
+        mode: SyncMode = SyncMode.STRICT_SINGLE,
+        sequence_observer: MoveSequenceObserver | None = None,
         required_stable_pairs: int = 2,
         global_threshold: float = 1.5,
         local_threshold: float = 3.0,
@@ -51,6 +66,8 @@ class StableMoveTracker:
     ) -> None:
         if required_stable_pairs <= 0:
             raise ValueError("required_stable_pairs must be positive")
+        if not isinstance(mode, SyncMode):
+            raise TypeError("mode must be a SyncMode")
         self._board = board
         self._geometry = geometry
         self._observer = observer
@@ -59,6 +76,13 @@ class StableMoveTracker:
         self._global_threshold = global_threshold
         self._local_threshold = local_threshold
         self._patch_size = patch_size
+        self._mode = mode
+        self._sequence_observer = sequence_observer
+        if self._mode is SyncMode.HUMAN_VS_AI and self._sequence_observer is None:
+            self._sequence_observer = LegalTwoPlyDiffObserver(
+                patch_size=patch_size,
+                committer=self._committer,
+            )
         self._confirmed_frame: NDArray[np.uint8] | None = None
         self._previous_frame: NDArray[np.uint8] | None = None
         self._motion_seen = False
@@ -136,7 +160,7 @@ class StableMoveTracker:
             return TrackingUpdate(
                 TrackingStatus.ACCEPTED,
                 self._board,
-                observation.move,
+                (observation.move,),
                 observation,
             )
         if observation.status is ObservationStatus.NO_CHANGE:
@@ -153,9 +177,59 @@ class StableMoveTracker:
                 observation=observation,
             )
 
+        if self._can_try_sequence(observation):
+            sequence_observer = self._sequence_observer
+            if sequence_observer is None:
+                return self._pause(observation)
+            sequence = sequence_observer.observe(
+                self._board,
+                self._confirmed_frame,
+                current,
+                self._geometry,
+            )
+            if sequence.status is ObservationStatus.ACCEPTED:
+                sequence_moves = (sequence.moves[0], sequence.moves[1])
+                if (
+                    not sequence.evidence.candidates
+                    or sequence.evidence.candidates[0].moves != sequence_moves
+                ):
+                    return self._pause(sequence)
+                try:
+                    verified_after = self._committer.commit_sequence(
+                        self._board,
+                        sequence_moves,
+                    )
+                except (IndexError, ValueError):
+                    return self._pause(sequence)
+                if (
+                    verified_after.position_id
+                    != sequence.evidence.candidates[0].final_position_id
+                ):
+                    return self._pause(sequence)
+                self._board = verified_after
+                self._confirmed_frame = current.copy()
+                self._motion_seen = False
+                self._stable_pairs = 0
+                return TrackingUpdate(
+                    TrackingStatus.ACCEPTED,
+                    self._board,
+                    sequence_moves,
+                    sequence,
+                )
+            return self._pause(sequence)
+
         return self._pause(observation)
 
-    def _pause(self, observation: MoveProposal) -> TrackingUpdate:
+    def _can_try_sequence(self, observation: MoveProposal) -> bool:
+        if self._mode is not SyncMode.HUMAN_VS_AI:
+            return False
+        reasons = frozenset(observation.evidence.rejection_reasons)
+        return bool(reasons & {"outside_change", "candidate_margin", "candidate_score"})
+
+    def _pause(
+        self,
+        observation: MoveProposal | MoveSequenceProposal,
+    ) -> TrackingUpdate:
         self._blocked_status = TrackingStatus.PAUSED_AMBIGUOUS
         return TrackingUpdate(
             TrackingStatus.PAUSED_AMBIGUOUS,
