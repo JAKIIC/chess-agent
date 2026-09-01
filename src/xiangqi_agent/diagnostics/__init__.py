@@ -6,5 +6,18 @@ from xiangqi_agent.diagnostics.endpoint_samples import (
     EndpointSampleV1,
     SampleKind,
 )
+from xiangqi_agent.diagnostics.transition_samples import (
+    TransitionPointCrops,
+    TransitionSampleRecorder,
+    TransitionSampleV2,
+)
 
-__all__ = ["EndpointCrops", "EndpointSampleRecorder", "EndpointSampleV1", "SampleKind"]
+__all__ = [
+    "EndpointCrops",
+    "EndpointSampleRecorder",
+    "EndpointSampleV1",
+    "SampleKind",
+    "TransitionPointCrops",
+    "TransitionSampleRecorder",
+    "TransitionSampleV2",
+]
