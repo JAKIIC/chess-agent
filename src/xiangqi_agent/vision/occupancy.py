@@ -10,10 +10,14 @@ from numpy.typing import NDArray
 
 from xiangqi_agent.domain.board import BoardState
 from xiangqi_agent.vision.geometry import BoardGeometry
+from xiangqi_agent.vision.templates import PieceTemplateBank
 
 _PATCH_SIZE = 48
 _OCCUPIED_THRESHOLD = 0.52
 _CONFIDENCE_WIDTH = 0.30
+_KNOWN_POSITION_PATCH_RATIO = 0.78
+_MINIMUM_TEMPLATE_SEPARATION = 0.004
+_KNOWN_POSITION_ALGORITHM = "known-position-template-occupancy-v1"
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,6 +103,56 @@ class CircularOccupancyObserver:
         return OccupancyEvidence(occupied, confidences, self.algorithm_version)
 
 
+class KnownPositionOccupancyObserver:
+    """Calibrate fixed-theme occupancy from one user-confirmed position.
+
+    Only compact template features are retained. If the initial frame does not
+    clearly separate occupied intersections from empty ones, calibration stays
+    unset and every point is reported with zero confidence.
+    """
+
+    algorithm_version = _KNOWN_POSITION_ALGORITHM
+
+    def __init__(self, board: BoardState) -> None:
+        if not isinstance(board, BoardState):
+            raise TypeError("board must be a BoardState")
+        if "." not in board.pieces or all(piece == "." for piece in board.pieces):
+            raise ValueError("board must contain both empty and occupied intersections")
+        self._board = board
+        self._bank: PieceTemplateBank | None = None
+        self._patch_size: int | None = None
+
+    def observe(
+        self,
+        frame: NDArray[np.uint8],
+        geometry: BoardGeometry,
+    ) -> OccupancyEvidence:
+        if not isinstance(geometry, BoardGeometry):
+            raise TypeError("geometry must be a BoardGeometry")
+        patch_size = self._patch_size or _adaptive_patch_size(geometry)
+        bank = self._bank or PieceTemplateBank.from_position(
+            self._board,
+            geometry,
+            frame,
+            patch_size=patch_size,
+        )
+        patches = geometry.crop_intersections(frame, size=patch_size)
+        evidence, separations = _classify_template_occupancy(bank, patches)
+
+        if self._bank is None:
+            expected = tuple(piece != "." for piece in self._board.pieces)
+            separated = min(separations) >= _MINIMUM_TEMPLATE_SEPARATION
+            if evidence.occupied != expected or not separated:
+                return OccupancyEvidence(
+                    expected,
+                    (0.0,) * 90,
+                    self.algorithm_version,
+                )
+            self._bank = bank
+            self._patch_size = patch_size
+        return evidence
+
+
 def compare_occupancy(
     evidence: OccupancyEvidence,
     board: BoardState,
@@ -170,3 +224,43 @@ def _score_confidence(score: float) -> float:
 
 def _clamp(value: float) -> float:
     return min(1.0, max(0.0, float(value)))
+
+
+def _adaptive_patch_size(geometry: BoardGeometry) -> int:
+    points = geometry.grid_points()
+    horizontal = float(np.hypot(
+        points[1][0] - points[0][0],
+        points[1][1] - points[0][1],
+    ))
+    vertical = float(np.hypot(
+        points[9][0] - points[0][0],
+        points[9][1] - points[0][1],
+    ))
+    return max(8, round(min(horizontal, vertical) * _KNOWN_POSITION_PATCH_RATIO))
+
+
+def _classify_template_occupancy(
+    bank: PieceTemplateBank,
+    patches: tuple[NDArray[np.uint8], ...],
+) -> tuple[OccupancyEvidence, tuple[float, ...]]:
+    distances = tuple(bank.occupancy_distances(patch) for patch in patches)
+    occupied = tuple(
+        occupied_distance < empty_distance
+        for empty_distance, occupied_distance in distances
+    )
+    separations = tuple(
+        abs(empty_distance - occupied_distance)
+        for empty_distance, occupied_distance in distances
+    )
+    confidences = tuple(
+        _clamp(separation / (empty_distance + occupied_distance + 1e-6))
+        for (empty_distance, occupied_distance), separation in zip(
+            distances,
+            separations,
+            strict=True,
+        )
+    )
+    return (
+        OccupancyEvidence(occupied, confidences, _KNOWN_POSITION_ALGORITHM),
+        separations,
+    )

@@ -64,6 +64,10 @@ class WindowsCaptureSource:
         self._on_frame: FrameCallback | None = None
         self._on_closed: ClosedCallback | None = None
 
+    @property
+    def fps(self) -> int:
+        return self._fps
+
     def start(
         self,
         on_frame: FrameCallback,

@@ -25,7 +25,7 @@ from xiangqi_agent.capture.monitor import (
     MonitorStatus,
 )
 from xiangqi_agent.capture.protocol import FrameSource
-from xiangqi_agent.capture.visible_window_source import VisibleWindowCaptureSource
+from xiangqi_agent.capture.windows_capture_source import WindowsCaptureSource
 from xiangqi_agent.diagnostics.stage_c_live_capture import StageCTerminalEventWriter
 from xiangqi_agent.domain.board import BoardState, Orientation
 from xiangqi_agent.platform.windows import WindowInfo, WindowsWindowCatalog
@@ -40,7 +40,10 @@ from xiangqi_agent.vision.geometry import (
     NormalizedQuad,
     parse_normalized_quad,
 )
-from xiangqi_agent.vision.occupancy import CircularOccupancyObserver, OccupancyObserver
+from xiangqi_agent.vision.occupancy import (
+    KnownPositionOccupancyObserver,
+    OccupancyObserver,
+)
 
 DEFAULT_QUAD = "0.315,0.132;0.678,0.132;0.678,0.862;0.315,0.862"
 
@@ -51,7 +54,7 @@ class WindowCatalog(Protocol):
 
 type SourceFactory = Callable[[WindowInfo], FrameSource]
 type BoardProvider = Callable[[], BoardState]
-type OccupancyObserverFactory = Callable[[], OccupancyObserver]
+type OccupancyObserverFactory = Callable[[BoardState], OccupancyObserver]
 
 
 class EvidenceWriter(Protocol):
@@ -123,7 +126,7 @@ class CapturePanel(QWidget):
             resolved_local_root
         )
         self._occupancy_observer_factory = (
-            occupancy_observer_factory or CircularOccupancyObserver
+            occupancy_observer_factory or KnownPositionOccupancyObserver
         )
         self._session_id_factory = session_id_factory or (lambda: uuid4().hex)
         self._event_id_factory = event_id_factory or (lambda: uuid4().hex)
@@ -318,7 +321,7 @@ class CapturePanel(QWidget):
                 self.status_label.setText(f"当前局面无效：{exc}")
                 return
             occupancy_observer = (
-                self._occupancy_observer_factory() if evidence_mode else None
+                self._occupancy_observer_factory(board) if evidence_mode else None
             )
             self._session = LiveSyncSession(
                 source,
@@ -472,7 +475,7 @@ class CapturePanel(QWidget):
 
 
 def _default_source_factory(window: WindowInfo) -> FrameSource:
-    return VisibleWindowCaptureSource(window, fps=2, burst_fps=20)
+    return WindowsCaptureSource(window, fps=20)
 
 
 def _window_label(window: WindowInfo) -> str:

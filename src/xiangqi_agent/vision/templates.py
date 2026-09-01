@@ -67,6 +67,27 @@ class PieceTemplateBank:
         candidate = _feature(patch)
         return _minimum_distance(examples, candidate)
 
+    def occupancy_distances(
+        self,
+        patch: NDArray[np.generic],
+    ) -> tuple[float, float]:
+        """Return the closest empty and occupied distances from one feature pass."""
+        if "." not in self._examples:
+            raise ValueError("template bank has no empty examples")
+        occupied_examples = tuple(
+            example
+            for symbol, examples in self._examples.items()
+            if symbol != "."
+            for example in examples
+        )
+        if not occupied_examples:
+            raise ValueError("template bank has no occupied examples")
+        candidate = _feature(patch)
+        return (
+            _minimum_distance(self._examples["."], candidate),
+            _minimum_distance(occupied_examples, candidate),
+        )
+
     def match(self, expected_symbol: str, patch: NDArray[np.generic]) -> TemplateMatch:
         expected = _validate_symbol(expected_symbol, self._examples)
         return self.match_any(frozenset({expected}), patch)

@@ -7,7 +7,7 @@ import numpy as np
 from PySide6.QtCore import Qt
 
 from xiangqi_agent.capture.fake import FakeFrameSource
-from xiangqi_agent.capture.visible_window_source import VisibleWindowCaptureSource
+from xiangqi_agent.capture.windows_capture_source import WindowsCaptureSource
 from xiangqi_agent.domain.board import BoardState
 from xiangqi_agent.domain.fen import parse_fen
 from xiangqi_agent.domain.rules import apply_move, legal_moves
@@ -15,7 +15,7 @@ from xiangqi_agent.platform.windows import WindowInfo
 from xiangqi_agent.sync.live_session import LiveSyncStatus, LiveSyncUpdate
 from xiangqi_agent.sync.mode import SyncMode
 from xiangqi_agent.ui.capture_panel import CapturePanel, _default_source_factory
-from xiangqi_agent.vision.occupancy import CircularOccupancyObserver
+from xiangqi_agent.vision.occupancy import KnownPositionOccupancyObserver
 
 START = "rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w"
 CELL = 24
@@ -41,14 +41,13 @@ class RecordingEvidenceWriter:
         return self.output
 
 
-def test_default_capture_backend_reads_the_visible_wechat_window() -> None:
+def test_default_capture_backend_uses_window_level_wgc_at_burst_rate() -> None:
     window = WindowInfo(42, "天天象棋", "WeChatAppEx.exe", (300, 200))
 
     source = _default_source_factory(window)
 
-    assert isinstance(source, VisibleWindowCaptureSource)
-    assert source.fps == 2
-    assert source.burst_fps == 20
+    assert isinstance(source, WindowsCaptureSource)
+    assert source.fps == 20
 
 
 def _render(board: BoardState) -> np.ndarray:
@@ -263,7 +262,10 @@ def test_local_evidence_mode_is_off_by_default_and_requires_human_ai_mode(
     assert panel._session is not None
     assert panel._session._capture_transition_evidence is True
     assert panel._session._require_matching_baseline is True
-    assert isinstance(panel._session._occupancy_observer, CircularOccupancyObserver)
+    assert isinstance(
+        panel._session._occupancy_observer,
+        KnownPositionOccupancyObserver,
+    )
     assert not panel.evidence_checkbox.isEnabled()
 
     panel.close_capture()

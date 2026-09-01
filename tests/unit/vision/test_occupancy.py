@@ -7,9 +7,11 @@ import pytest
 
 from xiangqi_agent.domain.board import BoardState, Orientation
 from xiangqi_agent.domain.fen import parse_fen
+from xiangqi_agent.domain.rules import apply_move, legal_moves
 from xiangqi_agent.vision.geometry import BoardGeometry, NormalizedQuad
 from xiangqi_agent.vision.occupancy import (
     CircularOccupancyObserver,
+    KnownPositionOccupancyObserver,
     OccupancyComparison,
     OccupancyEvidence,
     compare_occupancy,
@@ -145,6 +147,56 @@ def test_uniform_overlay_cannot_match_a_confirmed_starting_board() -> None:
 
     assert not comparison.accepted
     assert comparison.mismatched_points or comparison.low_confidence_points
+
+
+def test_known_position_observer_calibrates_theme_then_tracks_changed_occupancy() -> None:
+    baseline, geometry = _render_board(
+        START_BOARD,
+        (900, 1000),
+        Orientation.RED_BOTTOM,
+    )
+    move = next(move for move in legal_moves(START_BOARD) if move.uci == "h2e2")
+    after = apply_move(START_BOARD, move)
+    moved, moved_geometry = _render_board(
+        after,
+        (900, 1000),
+        Orientation.RED_BOTTOM,
+    )
+    observer = KnownPositionOccupancyObserver(START_BOARD)
+
+    baseline_evidence = observer.observe(baseline, geometry)
+    moved_evidence = observer.observe(moved, moved_geometry)
+
+    assert compare_occupancy(
+        baseline_evidence,
+        START_BOARD,
+        minimum_confidence=0.65,
+    ).accepted
+    assert compare_occupancy(
+        moved_evidence,
+        after,
+        minimum_confidence=0.65,
+    ).accepted
+    assert moved_evidence.algorithm_version == "known-position-template-occupancy-v1"
+
+
+def test_known_position_observer_rejects_an_unseparated_uniform_baseline() -> None:
+    _, geometry = _render_board(
+        START_BOARD,
+        (900, 1000),
+        Orientation.RED_BOTTOM,
+    )
+    white = np.full((1000, 900, 4), 255, dtype=np.uint8)
+
+    evidence = KnownPositionOccupancyObserver(START_BOARD).observe(white, geometry)
+    comparison = compare_occupancy(
+        evidence,
+        START_BOARD,
+        minimum_confidence=0.65,
+    )
+
+    assert not comparison.accepted
+    assert comparison.low_confidence_points == tuple(range(90))
 
 
 def _evidence_for(board: BoardState, *, confidence: float) -> OccupancyEvidence:

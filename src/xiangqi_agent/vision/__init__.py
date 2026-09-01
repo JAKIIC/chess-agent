@@ -6,6 +6,7 @@ from xiangqi_agent.vision.endpoint_features import (
 from xiangqi_agent.vision.geometry import BoardGeometry, GeometryError, NormalizedQuad
 from xiangqi_agent.vision.occupancy import (
     CircularOccupancyObserver,
+    KnownPositionOccupancyObserver,
     OccupancyComparison,
     OccupancyEvidence,
     OccupancyObserver,
@@ -19,6 +20,7 @@ __all__ = [
     "EndpointFeatures",
     "GeometryError",
     "InstanceTransferExtractor",
+    "KnownPositionOccupancyObserver",
     "NormalizedQuad",
     "OccupancyComparison",
     "OccupancyEvidence",

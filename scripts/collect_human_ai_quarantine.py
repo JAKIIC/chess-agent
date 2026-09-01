@@ -27,7 +27,7 @@ from xiangqi_agent.capture.protocol import (
     FrameCallback,
     FrameSource,
 )
-from xiangqi_agent.capture.visible_window_source import VisibleWindowCaptureSource
+from xiangqi_agent.capture.windows_capture_source import WindowsCaptureSource
 from xiangqi_agent.diagnostics.stage_c_gate import DEFAULT_STAGE_C_THRESHOLD_PROFILE
 from xiangqi_agent.diagnostics.stage_c_quarantine import (
     QuarantinedStageCEventV1,
@@ -52,7 +52,7 @@ from xiangqi_agent.sync.mode import SyncMode
 from xiangqi_agent.sync.transition_capture import TransitionCaptureEvidence
 from xiangqi_agent.vision.geometry import NormalizedQuad, parse_normalized_quad
 from xiangqi_agent.vision.occupancy import (
-    CircularOccupancyObserver,
+    KnownPositionOccupancyObserver,
     OccupancyObserver,
 )
 
@@ -189,7 +189,7 @@ def collect_human_ai_quarantine_event(
         stable_pairs=stable_pairs,
         patch_size=patch_size,
         capture_transition_evidence=True,
-        occupancy_observer=occupancy_observer or CircularOccupancyObserver(),
+        occupancy_observer=occupancy_observer or KnownPositionOccupancyObserver(board),
         require_matching_baseline=True,
     )
     deadline = monotonic() + timeout_seconds
@@ -423,7 +423,7 @@ def main(
     args = _parse_args(argv)
     window_catalog = catalog or WindowsWindowCatalog()
     factory = source_factory or (
-        lambda window: VisibleWindowCaptureSource(window, fps=2, burst_fps=20)
+        lambda window: WindowsCaptureSource(window, fps=20)
     )
     try:
         candidates = filter_target_windows(window_catalog.list_candidates())
