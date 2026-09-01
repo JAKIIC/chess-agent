@@ -41,3 +41,38 @@ class MoveProposal:
     move: Move | None
     evidence_score: float
     evidence: MoveEvidence
+
+
+@dataclass(frozen=True, slots=True)
+class SequenceCandidateEvidence:
+    moves: tuple[Move, Move]
+    changed_points: tuple[int, ...]
+    expected_change_floor: float
+    unexpected_difference: float
+    maximum_template_distance: float
+    minimum_template_margin: float
+    minimum_template_confidence: float
+    score: float
+    final_position_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class MoveSequenceEvidence:
+    candidates: tuple[SequenceCandidateEvidence, ...]
+    local_differences: tuple[float, ...]
+    rejection_reasons: tuple[str, ...]
+    feature_version: str
+
+
+@dataclass(frozen=True, slots=True)
+class MoveSequenceProposal:
+    status: ObservationStatus
+    moves: tuple[Move, ...]
+    evidence_score: float
+    evidence: MoveSequenceEvidence
+
+    def __post_init__(self) -> None:
+        if self.status is ObservationStatus.ACCEPTED and len(self.moves) != 2:
+            raise ValueError("accepted sequence must contain exactly two moves")
+        if self.status is not ObservationStatus.ACCEPTED and self.moves:
+            raise ValueError("rejected sequence must not expose moves")

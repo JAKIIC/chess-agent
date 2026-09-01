@@ -4,7 +4,13 @@ import pytest
 from xiangqi_agent.domain.board import BoardState
 from xiangqi_agent.domain.fen import parse_fen
 from xiangqi_agent.domain.rules import apply_move, legal_moves
-from xiangqi_agent.sync.evidence import MoveEvidence, MoveProposal, ObservationStatus
+from xiangqi_agent.sync.evidence import (
+    MoveEvidence,
+    MoveProposal,
+    MoveSequenceEvidence,
+    MoveSequenceProposal,
+    ObservationStatus,
+)
 from xiangqi_agent.sync.move_observer import LegalMoveDiffObserver
 from xiangqi_agent.sync.tracker import StableMoveTracker, TrackingStatus
 from xiangqi_agent.vision.geometry import BoardGeometry, NormalizedQuad
@@ -47,6 +53,35 @@ def _tracker(board: BoardState) -> StableMoveTracker:
         required_stable_pairs=2,
         patch_size=CELL,
     )
+
+
+def test_sequence_proposal_requires_exactly_two_moves_when_accepted() -> None:
+    with pytest.raises(ValueError, match="exactly two"):
+        MoveSequenceProposal(
+            status=ObservationStatus.ACCEPTED,
+            moves=(),
+            evidence_score=1.0,
+            evidence=MoveSequenceEvidence((), (), (), "two-ply-v1"),
+        )
+
+
+def test_sequence_proposal_rejects_moves_on_ambiguous_result() -> None:
+    board = parse_fen(START)
+    move = _move(board, "h2e2")
+    reply = _move(apply_move(board, move), "h7e7")
+
+    with pytest.raises(ValueError, match="must not expose"):
+        MoveSequenceProposal(
+            status=ObservationStatus.AMBIGUOUS,
+            moves=(move, reply),
+            evidence_score=0.0,
+            evidence=MoveSequenceEvidence(
+                (),
+                (),
+                ("candidate_margin",),
+                "two-ply-v1",
+            ),
+        )
 
 
 def test_tracker_waits_for_animation_to_end_before_accepting_move() -> None:
