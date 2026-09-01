@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-from typing import Protocol
+from collections.abc import Iterable
+from typing import Protocol, runtime_checkable
 
 import numpy as np
 from numpy.typing import NDArray
 
-from xiangqi_agent.domain.board import BoardState
+from xiangqi_agent.domain.board import BoardState, Move
 from xiangqi_agent.sync.committer import RuleStateCommitter, StateCommitter
 from xiangqi_agent.sync.evidence import (
     MoveSequenceEvidence,
@@ -20,13 +21,26 @@ from xiangqi_agent.sync.sequence_gate import (
 from xiangqi_agent.vision.geometry import BoardGeometry
 from xiangqi_agent.vision.templates import PieceTemplateBank, TemplateMatch
 
-_FEATURE_VERSION = "two-ply-template-v1"
+_FEATURE_VERSION = "two-ply-template-v2"
+_REPLY_CONSTRAINED_FEATURE_VERSION = _FEATURE_VERSION
 
 
 class MoveSequenceObserver(Protocol):
     def observe(
         self,
         board: BoardState,
+        before: NDArray[np.generic],
+        after: NDArray[np.generic],
+        geometry: BoardGeometry,
+    ) -> MoveSequenceProposal: ...
+
+
+@runtime_checkable
+class ReplyConstrainedMoveSequenceObserver(Protocol):
+    def observe_after_first(
+        self,
+        board: BoardState,
+        first: Move,
         before: NDArray[np.generic],
         after: NDArray[np.generic],
         geometry: BoardGeometry,
@@ -73,11 +87,54 @@ class LegalTwoPlyDiffObserver:
         after: NDArray[np.generic],
         geometry: BoardGeometry,
     ) -> MoveSequenceProposal:
+        return self._observe_projections(
+            board,
+            before,
+            after,
+            geometry,
+            self._committer.project_two_ply(board),
+            feature_version=_FEATURE_VERSION,
+        )
+
+    def observe_after_first(
+        self,
+        board: BoardState,
+        first: Move,
+        before: NDArray[np.generic],
+        after: NDArray[np.generic],
+        geometry: BoardGeometry,
+    ) -> MoveSequenceProposal:
+        """Score only legal replies after an already observed first move."""
+        return self._observe_projections(
+            board,
+            before,
+            after,
+            geometry,
+            self._committer.project_replies(board, first),
+            feature_version=_REPLY_CONSTRAINED_FEATURE_VERSION,
+        )
+
+    def _observe_projections(
+        self,
+        board: BoardState,
+        before: NDArray[np.generic],
+        after: NDArray[np.generic],
+        geometry: BoardGeometry,
+        projections: Iterable[tuple[tuple[Move, Move], BoardState]],
+        *,
+        feature_version: str,
+    ) -> MoveSequenceProposal:
         before_patches = geometry.crop_intersections(before, size=self._patch_size)
         after_patches = geometry.crop_intersections(after, size=self._patch_size)
         local = _local_differences(before_patches, after_patches)
         if max(local, default=0.0) < self._gate.profile.min_local_difference:
-            return _proposal(ObservationStatus.NO_CHANGE, (), local, ())
+            return _proposal(
+                ObservationStatus.NO_CHANGE,
+                (),
+                local,
+                (),
+                feature_version,
+            )
 
         templates = PieceTemplateBank.from_position(
             board,
@@ -88,7 +145,7 @@ class LegalTwoPlyDiffObserver:
         match_cache: dict[tuple[int, str], TemplateMatch] = {}
         candidates: list[SequenceCandidateEvidence] = []
         template_unavailable = False
-        for moves, final in self._committer.project_two_ply(board):
+        for moves, final in projections:
             changed_points = tuple(
                 index
                 for index, (left, right) in enumerate(
@@ -155,6 +212,7 @@ class LegalTwoPlyDiffObserver:
                 ranked,
                 local,
                 decision.rejection_reasons,
+                feature_version,
             )
 
         best = decision.candidate
@@ -168,7 +226,7 @@ class LegalTwoPlyDiffObserver:
             status=ObservationStatus.ACCEPTED,
             moves=best.moves,
             evidence_score=min(visual_confidence, best.minimum_template_confidence),
-            evidence=MoveSequenceEvidence(ranked, local, (), _FEATURE_VERSION),
+            evidence=MoveSequenceEvidence(ranked, local, (), feature_version),
         )
 
 
@@ -189,10 +247,11 @@ def _proposal(
     candidates: tuple[SequenceCandidateEvidence, ...],
     local: tuple[float, ...],
     reasons: tuple[str, ...],
+    feature_version: str,
 ) -> MoveSequenceProposal:
     return MoveSequenceProposal(
         status=status,
         moves=(),
         evidence_score=0.0,
-        evidence=MoveSequenceEvidence(candidates, local, reasons, _FEATURE_VERSION),
+        evidence=MoveSequenceEvidence(candidates, local, reasons, feature_version),
     )

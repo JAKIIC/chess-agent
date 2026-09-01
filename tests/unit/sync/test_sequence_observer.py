@@ -59,6 +59,30 @@ def test_two_ply_observer_accepts_the_only_legal_chain_matching_final_frame() ->
     assert proposal.status is ObservationStatus.ACCEPTED
     assert proposal.moves == (first, second)
     assert proposal.evidence.candidates[0].final_position_id == final.position_id
+    assert proposal.evidence.feature_version == "two-ply-template-v2"
+
+
+def test_two_ply_observer_only_scores_replies_after_a_confirmed_first_move() -> None:
+    board = parse_fen(START)
+    first = _move(board, "h2e2")
+    middle = apply_move(board, first)
+    second = _move(middle, "h7e7")
+    final = apply_move(middle, second)
+
+    proposal = LegalTwoPlyDiffObserver(patch_size=CELL).observe_after_first(
+        board,
+        first,
+        _render(board),
+        _render(final),
+        _geometry(),
+    )
+
+    assert proposal.status is ObservationStatus.ACCEPTED
+    assert proposal.moves == (first, second)
+    assert proposal.evidence.feature_version == "two-ply-template-v2"
+    assert all(
+        candidate.moves[0] == first for candidate in proposal.evidence.candidates
+    )
 
 
 def test_two_ply_observer_reports_no_change_for_the_confirmed_frame() -> None:

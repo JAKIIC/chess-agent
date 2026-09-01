@@ -21,6 +21,7 @@ from tests.unit.diagnostics.test_stage_c_promotion import (
 from tests.unit.diagnostics.test_stage_c_quarantine import _event
 from tests.unit.diagnostics.test_stage_c_samples import _crops, _sample
 from xiangqi_agent.diagnostics.stage_c_gate import (
+    DEFAULT_STAGE_C_FEATURE_VERSION,
     StageCGateIntegrityError,
     freeze_human_ai_stage_c,
     freeze_reviewed_human_ai_stage_c,
@@ -51,6 +52,7 @@ def test_legacy_v1_freeze_remains_available_as_a_read_only_api(tmp_path: Path) -
     output = freeze_human_ai_stage_c(
         root,
         "legacy-frozen.json",
+        feature_version="two-ply-template-v1",
         created_at_utc="2026-09-01T00:00:00Z",
     )
 
@@ -67,9 +69,12 @@ def _record(
     profile: str | None = None,
 ) -> Path:
     source_root = root.parent.parent / "stage-c-test-sources" / session_id / sample_id
-    event = replace(_event(), event_id=sample_id, session_id=session_id)
-    if feature is not None:
-        event = replace(event, feature_version=feature)
+    event = replace(
+        _event(),
+        event_id=sample_id,
+        session_id=session_id,
+        feature_version=feature or DEFAULT_STAGE_C_FEATURE_VERSION,
+    )
     if profile is not None:
         event = replace(event, threshold_profile_version=profile)
     event_dir = record_quarantine_event(source_root, event)
@@ -95,7 +100,12 @@ def _record_rejection(
         )
     elif scenario is StageCScenario.THREE_PLY:
         event = replace(event, rejection_reasons=("no_legal_candidates",))
-    event = replace(event, event_id=sample_id, session_id=session_id)
+    event = replace(
+        event,
+        event_id=sample_id,
+        session_id=session_id,
+        feature_version=DEFAULT_STAGE_C_FEATURE_VERSION,
+    )
     event_dir = record_quarantine_event(source_root, event)
     review_path = _review_rejection(source_root, event_dir, scenario, moves)
     return StageCPromotionService().promote(event_dir, review_path, root)
@@ -114,7 +124,7 @@ def test_freeze_cli_writes_sorted_portable_hash_locked_manifest(
     output = root / "frozen-stage-c.json"
     payload = json.loads(output.read_text("utf-8"))
     assert payload["schema_version"] == 1
-    assert payload["feature_version"] == "two-ply-template-v1"
+    assert payload["feature_version"] == DEFAULT_STAGE_C_FEATURE_VERSION
     assert set(payload["threshold_profile"]) == THRESHOLD_FIELDS
     assert payload["threshold_profile"] == {
         "max_template_distance": 0.18,
@@ -195,7 +205,7 @@ def test_freeze_cli_rejects_mixed_feature_versions(tmp_path: Path) -> None:
         root,
         sample_id="sample-b",
         session_id="session-b",
-        feature="two-ply-template-v2",
+        feature="two-ply-template-v1",
     )
 
     exit_code = main([str(root), "--output", "frozen-stage-c.json"])
@@ -242,7 +252,10 @@ def test_freeze_cli_has_no_runtime_threshold_override_arguments(tmp_path: Path) 
 def test_reviewed_only_freeze_accepts_promoted_v2_and_is_self_contained(
     tmp_path: Path,
 ) -> None:
-    event_dir = record_quarantine_event(tmp_path, _event())
+    event_dir = record_quarantine_event(
+        tmp_path,
+        replace(_event(), feature_version=DEFAULT_STAGE_C_FEATURE_VERSION),
+    )
     review_path = _review_valid(tmp_path, event_dir)
     reviewed = _reviewed_root(tmp_path)
     sample = StageCPromotionService().promote(event_dir, review_path, reviewed)
@@ -274,7 +287,10 @@ def test_reviewed_only_freeze_rejects_v1_quarantine_and_mutated_provenance(
     with pytest.raises(StageCGateIntegrityError, match="V2"):
         freeze_reviewed_human_ai_stage_c(legacy_root, "frozen.json")
 
-    event_dir = record_quarantine_event(tmp_path / "source", _event())
+    event_dir = record_quarantine_event(
+        tmp_path / "source",
+        replace(_event(), feature_version=DEFAULT_STAGE_C_FEATURE_VERSION),
+    )
     with pytest.raises(StageCGateIntegrityError, match="reviewed"):
         freeze_reviewed_human_ai_stage_c(
             event_dir.parent.parent,

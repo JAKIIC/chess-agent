@@ -1,3 +1,5 @@
+from time import perf_counter
+
 import numpy as np
 import pytest
 
@@ -403,6 +405,51 @@ def test_atomic_human_ai_tracker_waits_across_stable_first_ply_then_accepts_pair
     assert accepted.status is TrackingStatus.ACCEPTED
     assert accepted.moves == (first, second)
     assert accepted.board == final
+
+
+def test_atomic_pending_reply_skips_repeating_the_single_move_observer() -> None:
+    board = parse_fen(START)
+    first = _move(board, "h2e2")
+    middle = apply_move(board, first)
+    second = _move(middle, "h7e7")
+    final = apply_move(middle, second)
+
+    class SingleMoveObserver:
+        def __init__(self) -> None:
+            self.calls = 0
+            self._delegate = LegalMoveDiffObserver(patch_size=CELL)
+
+        def observe(self, *args: object) -> MoveProposal:
+            self.calls += 1
+            if self.calls > 1:
+                raise AssertionError("pending reply repeated single-move enumeration")
+            return self._delegate.observe(*args)  # type: ignore[arg-type]
+
+    observer = SingleMoveObserver()
+    tracker = StableMoveTracker(
+        board,
+        _geometry(),
+        observer,
+        mode=SyncMode.HUMAN_VS_AI,
+        sequence_observer=LegalTwoPlyDiffObserver(patch_size=CELL),
+        required_stable_pairs=2,
+        patch_size=CELL,
+        require_atomic_two_ply=True,
+    )
+    tracker.initialize(_render(board))
+
+    waiting = _settle(tracker, _render(middle))
+    started = perf_counter()
+    accepted = _settle(tracker, _render(final))
+    elapsed_ms = (perf_counter() - started) * 1000
+
+    assert waiting.status is TrackingStatus.WAITING_FOR_REPLY
+    assert accepted.status is TrackingStatus.ACCEPTED
+    assert accepted.moves == (first, second)
+    assert isinstance(accepted.observation, MoveSequenceProposal)
+    assert accepted.observation.evidence.feature_version == "two-ply-template-v2"
+    assert observer.calls == 1
+    assert elapsed_ms < 500
 
 
 def test_atomic_human_ai_tracker_uses_unique_occupancy_for_ambiguous_intermediate() -> None:

@@ -23,6 +23,12 @@ class StateCommitter(Protocol):
         board: BoardState,
     ) -> Iterator[tuple[tuple[Move, Move], BoardState]]: ...
 
+    def project_replies(
+        self,
+        board: BoardState,
+        first: Move,
+    ) -> Iterator[tuple[tuple[Move, Move], BoardState]]: ...
+
 
 class RuleStateCommitter:
     """Advance an immutable board only through the domain legality boundary."""
@@ -54,3 +60,12 @@ class RuleStateCommitter:
         for first, middle in legal_successors(board):
             for second, final in legal_successors(middle):
                 yield (first, second), final
+
+    def project_replies(
+        self,
+        board: BoardState,
+        first: Move,
+    ) -> Iterator[tuple[tuple[Move, Move], BoardState]]:
+        middle = self.commit(board, first)
+        for second, final in legal_successors(middle):
+            yield (first, second), final

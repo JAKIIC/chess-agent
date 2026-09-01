@@ -20,6 +20,7 @@ from xiangqi_agent.sync.move_observer import MoveObserver
 from xiangqi_agent.sync.sequence_observer import (
     LegalTwoPlyDiffObserver,
     MoveSequenceObserver,
+    ReplyConstrainedMoveSequenceObserver,
 )
 from xiangqi_agent.sync.transition_capture import (
     TransitionCaptureEvidence,
@@ -177,6 +178,13 @@ class StableMoveTracker:
             return TrackingUpdate(TrackingStatus.WAITING_FOR_STABLE, self._board)
 
         decision_started_ns = perf_counter_ns()
+        if self._require_atomic_two_ply and self._pending_first_move is not None:
+            return self._resolve_pending_reply(
+                current,
+                decision_started_ns,
+                capture_timestamp_ns,
+            )
+
         observation = self._observer.observe(
             self._board,
             self._confirmed_frame,
@@ -264,68 +272,14 @@ class StableMoveTracker:
                 current,
                 self._geometry,
             )
-            if sequence.status is ObservationStatus.ACCEPTED:
-                sequence_moves = (sequence.moves[0], sequence.moves[1])
-                if (
-                    self._pending_first_move is not None
-                    and sequence_moves[0] != self._pending_first_move
-                ):
-                    return self._pause(
-                        _failed_observation(sequence, "intermediate_move_mismatch"),
-                        current,
-                        decision_started_ns,
-                        capture_timestamp_ns,
-                    )
-                if (
-                    not sequence.evidence.candidates
-                    or sequence.evidence.candidates[0].moves != sequence_moves
-                ):
-                    return self._pause(
-                        _failed_observation(sequence, "candidate_evidence_mismatch"),
-                        current,
-                        decision_started_ns,
-                        capture_timestamp_ns,
-                    )
-                try:
-                    verified_after = self._committer.commit_sequence(
-                        self._board,
-                        sequence_moves,
-                    )
-                except (IndexError, ValueError):
-                    return self._pause(
-                        _failed_observation(sequence, "sequence_commit_failed"),
-                        current,
-                        decision_started_ns,
-                        capture_timestamp_ns,
-                    )
-                if (
-                    verified_after.position_id
-                    != sequence.evidence.candidates[0].final_position_id
-                ):
-                    return self._pause(
-                        _failed_observation(sequence, "final_position_mismatch"),
-                        current,
-                        decision_started_ns,
-                        capture_timestamp_ns,
-                    )
-                transition_evidence = self._build_transition_evidence(
-                    sequence,
-                    current,
-                    decision_started_ns,
-                    capture_timestamp_ns,
-                )
-                self._board = verified_after
-                self._confirmed_frame = current.copy()
-                self._motion_seen = False
-                self._stable_pairs = 0
-                self._pending_first_move = None
-                return TrackingUpdate(
-                    TrackingStatus.ACCEPTED,
-                    self._board,
-                    sequence_moves,
-                    sequence,
-                    transition_evidence,
-                )
+            resolved = self._commit_sequence(
+                sequence,
+                current,
+                decision_started_ns,
+                capture_timestamp_ns,
+            )
+            if resolved is not None:
+                return resolved
             if self._require_atomic_two_ply and self._pending_first_move is None:
                 intermediate = self._unique_intermediate_move(current)
                 if intermediate is not None:
@@ -347,6 +301,118 @@ class StableMoveTracker:
             current,
             decision_started_ns,
             capture_timestamp_ns,
+        )
+
+    def _resolve_pending_reply(
+        self,
+        current: NDArray[np.uint8],
+        decision_started_ns: int,
+        capture_timestamp_ns: int | None,
+    ) -> TrackingUpdate:
+        pending_first = self._pending_first_move
+        sequence_observer = self._sequence_observer
+        confirmed = self._confirmed_frame
+        if pending_first is None or sequence_observer is None or confirmed is None:
+            raise RuntimeError("pending reply requires a sequence observer and baseline")
+        if isinstance(sequence_observer, ReplyConstrainedMoveSequenceObserver):
+            sequence = sequence_observer.observe_after_first(
+                self._board,
+                pending_first,
+                confirmed,
+                current,
+                self._geometry,
+            )
+        else:
+            sequence = sequence_observer.observe(
+                self._board,
+                confirmed,
+                current,
+                self._geometry,
+            )
+        resolved = self._commit_sequence(
+            sequence,
+            current,
+            decision_started_ns,
+            capture_timestamp_ns,
+        )
+        if resolved is not None:
+            return resolved
+        return self._pause(
+            _failed_observation(sequence, "intermediate_move_mismatch"),
+            current,
+            decision_started_ns,
+            capture_timestamp_ns,
+        )
+
+    def _commit_sequence(
+        self,
+        sequence: MoveSequenceProposal,
+        current: NDArray[np.uint8],
+        decision_started_ns: int,
+        capture_timestamp_ns: int | None,
+    ) -> TrackingUpdate | None:
+        if sequence.status is not ObservationStatus.ACCEPTED:
+            return None
+        sequence_moves = (sequence.moves[0], sequence.moves[1])
+        if (
+            self._pending_first_move is not None
+            and sequence_moves[0] != self._pending_first_move
+        ):
+            return self._pause(
+                _failed_observation(sequence, "intermediate_move_mismatch"),
+                current,
+                decision_started_ns,
+                capture_timestamp_ns,
+            )
+        if (
+            not sequence.evidence.candidates
+            or sequence.evidence.candidates[0].moves != sequence_moves
+        ):
+            return self._pause(
+                _failed_observation(sequence, "candidate_evidence_mismatch"),
+                current,
+                decision_started_ns,
+                capture_timestamp_ns,
+            )
+        try:
+            verified_after = self._committer.commit_sequence(
+                self._board,
+                sequence_moves,
+            )
+        except (IndexError, ValueError):
+            return self._pause(
+                _failed_observation(sequence, "sequence_commit_failed"),
+                current,
+                decision_started_ns,
+                capture_timestamp_ns,
+            )
+        if (
+            verified_after.position_id
+            != sequence.evidence.candidates[0].final_position_id
+        ):
+            return self._pause(
+                _failed_observation(sequence, "final_position_mismatch"),
+                current,
+                decision_started_ns,
+                capture_timestamp_ns,
+            )
+        transition_evidence = self._build_transition_evidence(
+            sequence,
+            current,
+            decision_started_ns,
+            capture_timestamp_ns,
+        )
+        self._board = verified_after
+        self._confirmed_frame = current.copy()
+        self._motion_seen = False
+        self._stable_pairs = 0
+        self._pending_first_move = None
+        return TrackingUpdate(
+            TrackingStatus.ACCEPTED,
+            self._board,
+            sequence_moves,
+            sequence,
+            transition_evidence,
         )
 
     def _can_try_sequence(self, observation: MoveProposal) -> bool:

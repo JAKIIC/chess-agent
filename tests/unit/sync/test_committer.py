@@ -71,3 +71,23 @@ def test_rule_committer_projects_every_two_ply_chain_through_one_rule_boundary()
 
     assert matching == [expected_final]
     assert all(len(moves) == 2 for moves, _final in projections)
+
+
+def test_rule_committer_projects_only_replies_after_a_confirmed_first_move() -> None:
+    board = parse_fen(START)
+    expected_first = _move(board, "h2e2")
+    middle = RuleStateCommitter().commit(board, expected_first)
+    expected_second = _move(middle, "h7e7")
+    expected_final = RuleStateCommitter().commit(middle, expected_second)
+
+    projections = tuple(
+        RuleStateCommitter().project_replies(board, expected_first)
+    )
+
+    assert projections
+    assert all(moves[0] == expected_first for moves, _final in projections)
+    assert [
+        final
+        for moves, final in projections
+        if moves == (expected_first, expected_second)
+    ] == [expected_final]

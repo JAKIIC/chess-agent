@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-from xiangqi_agent.diagnostics.stage_c_gate import evaluate_stage_c_results
+from xiangqi_agent.diagnostics.stage_c_gate import (
+    DEFAULT_STAGE_C_FEATURE_VERSION,
+    evaluate_stage_c_results,
+)
 from xiangqi_agent.diagnostics.stage_c_replay import HumanAiStageCReplayResult
 from xiangqi_agent.diagnostics.stage_c_review import StageCReviewOutcome
 from xiangqi_agent.diagnostics.stage_c_samples import StageCExpectedOutcome, StageCScenario
@@ -42,7 +45,7 @@ def _valid_result(
         missed_valid=not accepted,
         recorded_observation_matches_replay=True,
         decision_latency_ms=latency_ms,
-        feature_version="two-ply-template-v1",
+        feature_version=DEFAULT_STAGE_C_FEATURE_VERSION,
         threshold_profile_version="human-ai-two-ply-v1",
         runtime_ns=2_000_000,
         review_outcome=review_outcome,
@@ -73,7 +76,7 @@ def _rejection_result(
         missed_valid=False,
         recorded_observation_matches_replay=True,
         decision_latency_ms=latency_ms,
-        feature_version="two-ply-template-v1",
+        feature_version=DEFAULT_STAGE_C_FEATURE_VERSION,
         threshold_profile_version="human-ai-two-ply-v1",
         runtime_ns=3_000_000,
         review_outcome=review_outcome,
@@ -89,6 +92,10 @@ def _report(
         valid or tuple(_valid_result(index) for index in range(30)),
         rejected or tuple(_rejection_result(index) for index in range(30)),
     )
+
+
+def test_release_gate_targets_the_current_two_ply_feature_version() -> None:
+    assert DEFAULT_STAGE_C_FEATURE_VERSION == "two-ply-template-v2"
 
 
 def test_29_valid_events_fail_the_count_gate() -> None:
