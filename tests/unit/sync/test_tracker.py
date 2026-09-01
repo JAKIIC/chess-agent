@@ -447,7 +447,10 @@ def test_atomic_pending_reply_skips_repeating_the_single_move_observer() -> None
     assert accepted.status is TrackingStatus.ACCEPTED
     assert accepted.moves == (first, second)
     assert isinstance(accepted.observation, MoveSequenceProposal)
-    assert accepted.observation.evidence.feature_version == "two-ply-template-v4"
+    assert (
+        accepted.observation.evidence.feature_version
+        == "two-ply-template-transfer-v5"
+    )
     assert observer.calls == 1
     assert elapsed_ms < 500
 

@@ -1,6 +1,7 @@
 from time import perf_counter
 from unittest.mock import Mock
 
+import cv2
 import numpy as np
 
 from xiangqi_agent.domain.board import BoardState, Move
@@ -53,6 +54,12 @@ def _paint_cell(frame: np.ndarray, index: int, value: int) -> None:
     ] = value
 
 
+def _paint_move_marker(frame: np.ndarray, index: int) -> None:
+    row, column = divmod(index, 9)
+    center = (column * CELL + CELL // 2, row * CELL + CELL // 2)
+    cv2.circle(frame, center, 7, (255, 255, 255, 255), thickness=1)
+
+
 def test_two_ply_observer_accepts_the_only_legal_chain_matching_final_frame() -> None:
     board = parse_fen(START)
     first = _move(board, "h2e2")
@@ -70,7 +77,7 @@ def test_two_ply_observer_accepts_the_only_legal_chain_matching_final_frame() ->
     assert proposal.status is ObservationStatus.ACCEPTED
     assert proposal.moves == (first, second)
     assert proposal.evidence.candidates[0].final_position_id == final.position_id
-    assert proposal.evidence.feature_version == "two-ply-template-v4"
+    assert proposal.evidence.feature_version == "two-ply-template-transfer-v5"
 
 
 def test_two_ply_observer_only_scores_replies_after_a_confirmed_first_move() -> None:
@@ -90,7 +97,7 @@ def test_two_ply_observer_only_scores_replies_after_a_confirmed_first_move() -> 
 
     assert proposal.status is ObservationStatus.ACCEPTED
     assert proposal.moves == (first, second)
-    assert proposal.evidence.feature_version == "two-ply-template-v4"
+    assert proposal.evidence.feature_version == "two-ply-template-transfer-v5"
     assert all(
         candidate.moves[0] == first for candidate in proposal.evidence.candidates
     )
@@ -254,6 +261,49 @@ def test_two_ply_observer_ignores_disappearing_prior_highlights_that_keep_semant
 
     assert proposal.status is ObservationStatus.ACCEPTED
     assert proposal.moves == (first, second)
+
+
+def test_two_ply_observer_uses_piece_transfer_when_empty_sources_keep_move_markers() -> None:
+    board = parse_fen(START)
+    first = _move(board, "h2e2")
+    middle = apply_move(board, first)
+    second = _move(middle, "h7e7")
+    final = apply_move(middle, second)
+    after = _render(final)
+    _paint_move_marker(after, first.from_index)
+    _paint_move_marker(after, second.from_index)
+
+    proposal = LegalTwoPlyDiffObserver(
+        patch_size=CELL,
+        min_template_confidence=0.999,
+    ).observe(
+        board,
+        _render(board),
+        after,
+        _geometry(),
+    )
+
+    assert proposal.status is ObservationStatus.ACCEPTED
+    assert proposal.moves == (first, second)
+    assert proposal.evidence.feature_version == "two-ply-template-transfer-v5"
+
+
+def test_piece_transfer_cannot_turn_move_markers_without_piece_motion_into_a_move() -> None:
+    board = parse_fen(START)
+    after = _render(board)
+    candidate = _move(board, "h2e2")
+    _paint_move_marker(after, candidate.from_index)
+    _paint_move_marker(after, candidate.to_index)
+
+    proposal = LegalTwoPlyDiffObserver(patch_size=CELL).observe(
+        board,
+        _render(board),
+        after,
+        _geometry(),
+    )
+
+    assert proposal.status is not ObservationStatus.ACCEPTED
+    assert proposal.moves == ()
 
 
 def test_two_ply_observer_rejects_a_weak_outside_semantic_change() -> None:

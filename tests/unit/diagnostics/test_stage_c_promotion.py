@@ -4,6 +4,7 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from tests.unit.diagnostics.test_stage_c_quarantine import (
@@ -39,6 +40,7 @@ from xiangqi_agent.diagnostics.stage_c_samples import (
     StageCObservedStatus,
     StageCScenario,
 )
+from xiangqi_agent.diagnostics.transition_samples import TransitionPointCrops
 from xiangqi_agent.domain.board import BoardState
 from xiangqi_agent.domain.rules import apply_move, legal_moves
 
@@ -110,6 +112,81 @@ def test_low_confidence_rule_changed_point_needs_review(tmp_path: Path) -> None:
     review_path = _review_valid(tmp_path, event_dir)
 
     decision = StageCPromotionVerifier().verify(event_dir, review_path)
+    assert decision.status is PromotionStatus.NEEDS_REVIEW
+    assert decision.reason_codes == ("changed_point_confidence",)
+
+
+def test_v5_strong_piece_transfer_can_verify_low_confidence_changed_points(
+    tmp_path: Path,
+) -> None:
+    event = _low_confidence_changed_points(
+        replace(_event(), feature_version="two-ply-template-transfer-v5")
+    )
+    event_dir = _record(tmp_path, event, crops=_piece_transfer_crops(strong=True))
+    review_path = _review_valid(tmp_path, event_dir)
+
+    decision = StageCPromotionVerifier().verify(event_dir, review_path)
+
+    assert decision.status is PromotionStatus.PROMOTABLE
+
+
+@pytest.mark.parametrize(
+    ("feature_version", "strong"),
+    (
+        ("two-ply-template-transfer-v5", False),
+        ("two-ply-template-v4", True),
+    ),
+)
+def test_piece_transfer_does_not_bypass_weak_evidence_or_old_versions(
+    tmp_path: Path,
+    feature_version: str,
+    strong: bool,
+) -> None:
+    event = _low_confidence_changed_points(
+        replace(_event(), feature_version=feature_version)
+    )
+    event_dir = _record(tmp_path, event, crops=_piece_transfer_crops(strong=strong))
+    review_path = _review_valid(tmp_path, event_dir)
+
+    decision = StageCPromotionVerifier().verify(event_dir, review_path)
+
+    assert decision.status is PromotionStatus.NEEDS_REVIEW
+    assert decision.reason_codes == ("changed_point_confidence",)
+
+
+@pytest.mark.parametrize("mutation", ("final_occupancy", "candidate_confidence"))
+def test_v5_piece_transfer_cannot_bypass_other_frozen_evidence(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    event = _low_confidence_changed_points(
+        replace(_event(), feature_version="two-ply-template-transfer-v5")
+    )
+    if mutation == "final_occupancy":
+        occupied = list(event.after_occupancy.occupied)
+        occupied[22] = not occupied[22]
+        event = replace(
+            event,
+            after_occupancy=replace(
+                event.after_occupancy,
+                occupied=tuple(occupied),
+            ),
+        )
+    else:
+        event = replace(
+            event,
+            candidates=(
+                replace(
+                    event.candidates[0],
+                    minimum_template_confidence=0.79,
+                ),
+            ),
+        )
+    event_dir = _record(tmp_path, event, crops=_piece_transfer_crops(strong=True))
+    review_path = _review_valid(tmp_path, event_dir)
+
+    decision = StageCPromotionVerifier().verify(event_dir, review_path)
+
     assert decision.status is PromotionStatus.NEEDS_REVIEW
     assert decision.reason_codes == ("changed_point_confidence",)
 
@@ -301,11 +378,61 @@ def test_promotion_refuses_existing_target_overlapping_roots_and_source_mutation
     assert not target.exists()
 
 
-def _record(tmp_path: Path, event: QuarantinedStageCEventV1) -> Path:
+def _record(
+    tmp_path: Path,
+    event: QuarantinedStageCEventV1,
+    *,
+    crops: tuple[TransitionPointCrops, ...] | None = None,
+) -> Path:
     return QuarantineEventRecorder(_quarantine_root(tmp_path), enabled=True).record(
         event,
-        _crops(event.changed_points),
+        crops or _crops(event.changed_points),
     )
+
+
+def _low_confidence_changed_points(
+    event: QuarantinedStageCEventV1,
+) -> QuarantinedStageCEventV1:
+    confidences = list(event.after_occupancy.confidences)
+    for index in event.changed_points:
+        confidences[index] = 0.2
+    return replace(
+        event,
+        after_occupancy=replace(
+            event.after_occupancy,
+            confidences=tuple(confidences),
+        ),
+    )
+
+
+def _piece_transfer_crops(*, strong: bool) -> tuple[TransitionPointCrops, ...]:
+    empty = _patch((188, 214, 233), vertical=False)
+    red_piece = _patch((35, 45, 190), vertical=True)
+    black_piece = _patch((45, 45, 45), vertical=False)
+    wrong_red = _patch((190, 55, 35), vertical=False)
+    wrong_black = _patch((30, 180, 45), vertical=True)
+    values = {
+        22: (empty, black_piece if strong else wrong_black),
+        25: (black_piece, empty),
+        67: (empty, red_piece if strong else wrong_red),
+        70: (red_piece, empty),
+    }
+    return tuple(
+        TransitionPointCrops(point, *values[point])
+        for point in (22, 25, 67, 70)
+    )
+
+
+def _patch(color: tuple[int, int, int], *, vertical: bool) -> np.ndarray:
+    patch = np.full((48, 48, 4), (188, 214, 233, 255), dtype=np.uint8)
+    yy, xx = np.ogrid[:48, :48]
+    circle = (xx - 24) ** 2 + (yy - 24) ** 2 <= 15**2
+    patch[circle, :3] = color
+    if vertical:
+        patch[10:38, 21:27, :3] = (245, 245, 245)
+    else:
+        patch[21:27, 10:38, :3] = (245, 245, 245)
+    return patch
 
 
 def _review_valid(

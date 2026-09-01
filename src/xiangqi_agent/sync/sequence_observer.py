@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from dataclasses import replace
 from typing import Protocol, runtime_checkable
 
+import cv2
 import numpy as np
 from numpy.typing import NDArray
 
+from xiangqi_agent.diagnostics.endpoint_samples import EndpointCrops
 from xiangqi_agent.domain.board import BoardState, Move
 from xiangqi_agent.domain.rules import legal_moves
 from xiangqi_agent.sync.committer import RuleStateCommitter, StateCommitter
@@ -19,10 +22,11 @@ from xiangqi_agent.sync.sequence_gate import (
     SequenceDecisionGate,
     SequenceThresholdProfile,
 )
+from xiangqi_agent.vision.endpoint_features import InstanceTransferExtractor
 from xiangqi_agent.vision.geometry import BoardGeometry
 from xiangqi_agent.vision.templates import PieceTemplateBank, TemplateMatch
 
-_FEATURE_VERSION = "two-ply-template-v4"
+_FEATURE_VERSION = "two-ply-template-transfer-v5"
 _REPLY_CONSTRAINED_FEATURE_VERSION = _FEATURE_VERSION
 
 
@@ -147,6 +151,7 @@ class LegalTwoPlyDiffObserver:
             patch_size=self._patch_size,
         )
         match_cache: dict[tuple[int, str], TemplateMatch] = {}
+        confidence_components: dict[tuple[Move, Move], tuple[float, float]] = {}
         candidates: list[SequenceCandidateEvidence] = []
         template_unavailable = False
         for moves, final in projections:
@@ -159,7 +164,7 @@ class LegalTwoPlyDiffObserver:
             )
             if not changed_points:
                 continue
-            matches: list[TemplateMatch] = []
+            endpoint_matches: list[TemplateMatch] = []
             try:
                 for index in changed_points:
                     symbol = final.pieces[index]
@@ -168,7 +173,7 @@ class LegalTwoPlyDiffObserver:
                     if match is None:
                         match = templates.match(symbol, after_patches[index])
                         match_cache[key] = match
-                    matches.append(match)
+                    endpoint_matches.append(match)
             except ValueError:
                 template_unavailable = True
                 continue
@@ -181,6 +186,7 @@ class LegalTwoPlyDiffObserver:
                 and difference > self._gate.profile.max_unexpected_difference
             )
             semantic_artifacts: set[int] = set()
+            artifact_matches: list[TemplateMatch] = []
             try:
                 # A bounded outside difference can only be treated as UI
                 # highlight/shadow when the final patch still matches the
@@ -205,7 +211,7 @@ class LegalTwoPlyDiffObserver:
                             after_patches[index],
                         )
                         match_cache[key] = match
-                    matches.append(match)
+                    artifact_matches.append(match)
                     if (
                         match.distance <= self._gate.profile.max_template_distance
                         and match.confidence
@@ -222,6 +228,14 @@ class LegalTwoPlyDiffObserver:
                     if index not in changed and index not in semantic_artifacts
                 ),
                 default=0.0,
+            )
+            matches = (*endpoint_matches, *artifact_matches)
+            confidence_components[moves] = (
+                min(match.confidence for match in endpoint_matches),
+                min(
+                    (match.confidence for match in artifact_matches),
+                    default=1.0,
+                ),
             )
             candidates.append(
                 SequenceCandidateEvidence(
@@ -251,6 +265,38 @@ class LegalTwoPlyDiffObserver:
             ranked,
             template_unavailable=template_unavailable,
         )
+        if (
+            not decision.accepted
+            and decision.rejection_reasons == ("template_confidence",)
+            and ranked
+        ):
+            # Persistent source/destination markers can make an otherwise
+            # correct empty endpoint visually close to an occupied template.
+            # Only when every other hard gate already passed may the same
+            # physical pieces' source-before -> target-after evidence satisfy
+            # the unchanged semantic-confidence threshold.
+            transfer_confidence = _piece_transfer_confidence(
+                ranked[0].moves,
+                before_patches,
+                after_patches,
+            )
+            endpoint_confidence, artifact_confidence = confidence_components[
+                ranked[0].moves
+            ]
+            effective_confidence = min(
+                max(endpoint_confidence, transfer_confidence),
+                artifact_confidence,
+            )
+            if effective_confidence > ranked[0].minimum_template_confidence:
+                adjusted = replace(
+                    ranked[0],
+                    minimum_template_confidence=effective_confidence,
+                )
+                ranked = (adjusted, *ranked[1:])
+                decision = self._gate.evaluate(
+                    ranked,
+                    template_unavailable=template_unavailable,
+                )
         if not decision.accepted:
             return _proposal(
                 ObservationStatus.AMBIGUOUS,
@@ -300,6 +346,39 @@ def _local_differences(
         )
         for left, right in zip(before_patches, after_patches, strict=True)
     )
+
+
+def _piece_transfer_confidence(
+    moves: tuple[Move, Move],
+    before_patches: tuple[NDArray[np.uint8], ...],
+    after_patches: tuple[NDArray[np.uint8], ...],
+) -> float:
+    first, second = moves
+    surviving_moves = (
+        (first, second)
+        if second.to_index != first.to_index
+        else (second,)
+    )
+    extractor = InstanceTransferExtractor()
+    scores = tuple(
+        extractor.extract(
+            EndpointCrops(
+                source_before=_feature_patch(before_patches[move.from_index]),
+                source_after=_feature_patch(after_patches[move.from_index]),
+                target_before=_feature_patch(before_patches[move.to_index]),
+                target_after=_feature_patch(after_patches[move.to_index]),
+            )
+        ).instance_evidence_score
+        for move in surviving_moves
+    )
+    return min(scores)
+
+
+def _feature_patch(patch: NDArray[np.uint8]) -> NDArray[np.uint8]:
+    if patch.shape == (48, 48, 4):
+        return np.array(patch, dtype=np.uint8, copy=True)
+    resized = cv2.resize(patch, (48, 48), interpolation=cv2.INTER_LINEAR)
+    return np.asarray(resized, dtype=np.uint8)
 
 
 def _proposal(

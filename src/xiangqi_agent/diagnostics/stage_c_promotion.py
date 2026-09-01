@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, cast
 from uuid import uuid4
 
+from xiangqi_agent.diagnostics.endpoint_samples import EndpointCrops
 from xiangqi_agent.diagnostics.stage_c_quarantine import (
     LoadedQuarantinedStageCEvent,
     QuarantineEventLoader,
@@ -31,11 +32,14 @@ from xiangqi_agent.diagnostics.stage_c_samples import (
     StageCObservedStatus,
     StageCScenario,
 )
-from xiangqi_agent.domain.board import BoardState
+from xiangqi_agent.domain.board import BoardState, Move
 from xiangqi_agent.domain.fen import parse_fen
 from xiangqi_agent.domain.rules import apply_move, legal_moves
+from xiangqi_agent.vision.endpoint_features import InstanceTransferExtractor
 
 _MINIMUM_OCCUPANCY_CONFIDENCE = 0.65
+_MINIMUM_PIECE_TRANSFER_CONFIDENCE = 0.8
+_PIECE_TRANSFER_FEATURE_VERSION = "two-ply-template-transfer-v5"
 _MACHINE_TERMINAL_REASONS = frozenset(
     {
         "frame_size_changed",
@@ -92,7 +96,7 @@ class _Inspection:
 
 
 class StageCPromotionVerifier:
-    verifier_version = "stage-c-promotion-v1"
+    verifier_version = "stage-c-promotion-v2"
     occupancy_verifier_version = "occupancy-evidence-v1"
 
     def verify(self, event_dir: Path, review_path: Path) -> PromotionDecision:
@@ -185,7 +189,12 @@ class StageCPromotionVerifier:
                 or review.expected_final_position_id != projected.position_id
             ):
                 return _rejected("final_position_mismatch")
-            evidence = _verify_projected_evidence(event, board, projected)
+            evidence = _verify_projected_evidence(
+                event,
+                board,
+                projected,
+                review.moves_uci,
+            )
             if evidence is not None:
                 return evidence
         else:
@@ -197,7 +206,12 @@ class StageCPromotionVerifier:
             )
             if scenario_result is not None:
                 return scenario_result
-            evidence = _verify_projected_evidence(event, board, projected)
+            evidence = _verify_projected_evidence(
+                event,
+                board,
+                projected,
+                review.moves_uci,
+            )
             if evidence is not None:
                 return evidence
 
@@ -429,6 +443,7 @@ def _verify_projected_evidence(
     event: LoadedQuarantinedStageCEvent,
     before: BoardState,
     after: BoardState,
+    moves_uci: tuple[str, ...],
 ) -> _Inspection | None:
     metadata = event.metadata
     expected_after = tuple(piece != "." for piece in after.pieces)
@@ -444,16 +459,95 @@ def _verify_projected_evidence(
     if high_confidence_mismatch:
         return _rejected("final_occupancy_mismatch")
     changed = _changed_points(before, after)
-    if any(
-        metadata.after_occupancy.confidences[index] < _MINIMUM_OCCUPANCY_CONFIDENCE
-        for index in changed
-    ):
-        return _needs_review("changed_point_confidence")
     if not set(changed) <= set(metadata.changed_points):
         return _rejected("missing_changed_point_crop")
     if any(metadata.local_differences[index] <= 0 for index in changed):
         return _rejected("missing_local_change")
+    if any(
+        metadata.after_occupancy.confidences[index] < _MINIMUM_OCCUPANCY_CONFIDENCE
+        for index in changed
+    ) and not _piece_transfer_verifies_changed_points(
+        event,
+        before,
+        after,
+        moves_uci,
+    ):
+        return _needs_review("changed_point_confidence")
     return None
+
+
+def _piece_transfer_verifies_changed_points(
+    event: LoadedQuarantinedStageCEvent,
+    before: BoardState,
+    after: BoardState,
+    moves_uci: tuple[str, ...],
+) -> bool:
+    metadata = event.metadata
+    if (
+        metadata.feature_version != _PIECE_TRANSFER_FEATURE_VERSION
+        or metadata.observed_status is not StageCObservedStatus.ACCEPTED
+        or metadata.observed_moves_uci != moves_uci
+        or len(moves_uci) != 2
+        or metadata.after_occupancy.occupied
+        != tuple(piece != "." for piece in after.pieces)
+    ):
+        return False
+    candidate = next(
+        (
+            value
+            for value in metadata.candidates
+            if value.moves_uci == moves_uci
+            and value.final_position_id == after.position_id
+        ),
+        None,
+    )
+    if (
+        candidate is None
+        or candidate.minimum_template_confidence
+        < _MINIMUM_PIECE_TRANSFER_CONFIDENCE
+    ):
+        return False
+    moves = _projected_moves(before, moves_uci)
+    if moves is None or len(moves) != 2:
+        return False
+    first, second = moves
+    surviving_moves = (first, second) if second.to_index != first.to_index else (second,)
+    crops = {crop.point_index: crop for crop in event.crops}
+    extractor = InstanceTransferExtractor()
+    for move in surviving_moves:
+        source = crops.get(move.from_index)
+        target = crops.get(move.to_index)
+        if source is None or target is None:
+            return False
+        score = extractor.extract(
+            EndpointCrops(
+                source_before=source.before,
+                source_after=source.after,
+                target_before=target.before,
+                target_after=target.after,
+            )
+        ).instance_evidence_score
+        if score < _MINIMUM_PIECE_TRANSFER_CONFIDENCE:
+            return False
+    return True
+
+
+def _projected_moves(
+    board: BoardState,
+    moves_uci: tuple[str, ...],
+) -> tuple[Move, ...] | None:
+    projected = board
+    moves: list[Move] = []
+    for uci in moves_uci:
+        move = next(
+            (candidate for candidate in legal_moves(projected) if candidate.uci == uci),
+            None,
+        )
+        if move is None:
+            return None
+        moves.append(move)
+        projected = apply_move(projected, move)
+    return tuple(moves)
 
 
 def _verify_rejection_scenario(
