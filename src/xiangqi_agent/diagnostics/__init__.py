@@ -6,6 +6,13 @@ from xiangqi_agent.diagnostics.endpoint_samples import (
     EndpointSampleV1,
     SampleKind,
 )
+from xiangqi_agent.diagnostics.stage_c_quarantine import (
+    LoadedQuarantinedStageCEvent,
+    QuarantinedStageCEventV1,
+    QuarantineEventIntegrityError,
+    QuarantineEventLoader,
+    QuarantineEventRecorder,
+)
 from xiangqi_agent.diagnostics.stage_c_samples import (
     HumanAiStageCSampleRecorder,
     HumanAiStageCSampleV1,
@@ -26,6 +33,11 @@ __all__ = [
     "EndpointSampleV1",
     "HumanAiStageCSampleRecorder",
     "HumanAiStageCSampleV1",
+    "LoadedQuarantinedStageCEvent",
+    "QuarantineEventIntegrityError",
+    "QuarantineEventLoader",
+    "QuarantineEventRecorder",
+    "QuarantinedStageCEventV1",
     "SampleKind",
     "StageCCandidateRecord",
     "StageCExpectedOutcome",
