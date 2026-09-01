@@ -5,6 +5,8 @@
 **实施范围：** Accelerated Batch 1.4–1.5  
 **上位约束：** `docs/superpowers/specs/2026-08-28-xiangqi-learning-agent-design.md`
 
+> 本规范继续作为严格单步同步的最高约束。显式人机练习模式下“用户一步 + 人机立即应手”的受限双步原子同步例外，单独定义于 `docs/superpowers/specs/2026-09-01-human-ai-two-ply-sync-design.md`；该例外不得改变本规范的单步门限或扩展到其他模式。
+
 ## 1. 目标
 
 在不扩展到通用 ONNX 全盘识别的前提下，建立一条可回放、可比较、可冻结门限的真实视觉证据闭环。当画面中出现一步合法走棋时，系统必须先产生不改变棋局的证据和候选，只有所有硬门通过后才能由唯一提交层更新 `BoardState`。
@@ -156,4 +158,3 @@ AND top-1 margin passes
 - 在阶段 C 通过之前，实时视觉链路不得自动触发 Pikafish。
 - DeepSeek 暂不接真实 API；只在引擎证据契约完成后用 mock 进行校验器测试。
 - 最小诊断窗口可在采集链路通过后实现，完整产品 UI、SQLite、PyInstaller 和十盘验收不属于本设计。
-
