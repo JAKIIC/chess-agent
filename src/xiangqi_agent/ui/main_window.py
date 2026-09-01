@@ -36,7 +36,9 @@ from xiangqi_agent.domain.rules import legal_moves
 from xiangqi_agent.engine.installer import load_installed_pikafish
 from xiangqi_agent.engine.process import PikafishProcess
 from xiangqi_agent.engine.service import AnalysisEngine, AnalysisFailure, AnalysisService
+from xiangqi_agent.sync.committer import RuleStateCommitter
 from xiangqi_agent.sync.live_session import LiveSyncStatus, LiveSyncUpdate
+from xiangqi_agent.sync.mode import SyncMode
 from xiangqi_agent.ui.analysis_view_model import analysis_rows
 from xiangqi_agent.ui.board_widget import BoardWidget
 from xiangqi_agent.ui.capture_panel import CapturePanel, CaptureRecoveryStatus
@@ -303,23 +305,40 @@ class MainWindow(QMainWindow):
             self._pending_recovery_id = None
             self._adopt_board(update.board, "手工 FEN 已确认，正在进行快速分析…")
             return
-        if update.status is not LiveSyncStatus.MOVE_ACCEPTED or update.move is None:
+        if update.status is not LiveSyncStatus.MOVE_ACCEPTED or not update.moves:
             return
         if self._pending_manual_board is not None:
+            return
+        if len(update.moves) not in (1, 2):
+            return
+        if len(update.moves) == 2 and update.sync_mode is not SyncMode.HUMAN_VS_AI:
             return
         before = self._board
         if before is None or update.board.position_id == before.position_id:
             return
         if update.before_position_id != before.position_id:
             return
-        notation = to_chinese(before, update.move)
+        if update.after_position_id != update.board.position_id:
+            return
+        projected = before
+        notations: list[str] = []
+        committer = RuleStateCommitter()
+        try:
+            for move in update.moves:
+                notations.append(to_chinese(projected, move))
+                projected = committer.project(projected, (move,))
+        except ValueError:
+            return
+        if projected != update.board:
+            return
+        notation = " · ".join(notations)
         phase = f"已同步 {notation} · 正在进行快速分析…"
         if not self._enable_live_analysis:
             phase = f"已同步 {notation}；实时分析已锁定，等待 Stage C 盲测通过"
         self._adopt_board(
             update.board,
             phase,
-            last_move=update.move,
+            last_move=update.moves[-1],
             submit_analysis=self._enable_live_analysis,
         )
 

@@ -16,6 +16,7 @@ from xiangqi_agent.domain.rules import apply_move, legal_moves
 from xiangqi_agent.engine.service import AnalysisFailure
 from xiangqi_agent.platform.windows import WindowInfo
 from xiangqi_agent.sync.live_session import LiveSyncStatus, LiveSyncUpdate
+from xiangqi_agent.sync.mode import SyncMode
 from xiangqi_agent.ui.capture_panel import CapturePanel
 from xiangqi_agent.ui.main_window import MainWindow
 
@@ -232,6 +233,118 @@ def test_confirmed_live_move_updates_board_without_starting_gated_analysis(
     assert engine.calls == []
     assert window.results.rowCount() == 0
     assert "盲测" in window.phase_label.text()
+    window.close()
+
+
+def test_two_ply_sync_replays_both_notations_and_adopts_only_the_final_board(
+    qtbot: object,
+) -> None:
+    board = parse_fen(START)
+    first = next(move for move in legal_moves(board) if move.uci == "h2e2")
+    middle = apply_move(board, first)
+    second = next(move for move in legal_moves(middle) if move.uci == "h7e7")
+    final = apply_move(middle, second)
+    engine = ImmediateEngine()
+    capture_panel = CapturePanel(
+        catalog=OneWindowCatalog(WindowInfo(42, "天天象棋", "x", (1, 1)))
+    )
+    window = MainWindow(
+        engine=engine,
+        coach_client=DeepSeekClient(api_key=None),
+        capture_panel=capture_panel,
+    )
+    qtbot.addWidget(window)  # type: ignore[attr-defined]
+
+    capture_panel.sync_update.emit(
+        LiveSyncUpdate(
+            status=LiveSyncStatus.MOVE_ACCEPTED,
+            board=final,
+            message="atomic double",
+            moves=(first, second),
+            before_position_id=board.position_id,
+            after_position_id=final.position_id,
+            sync_mode=SyncMode.HUMAN_VS_AI,
+        )
+    )
+
+    assert window.board_widget.board == final
+    assert window.board_widget.last_move == second
+    assert "炮二平五 · 炮8平5" in window.phase_label.text()
+    assert engine.calls == []
+    window.close()
+
+
+def test_two_ply_sync_submits_only_the_final_position_to_live_analysis(
+    qtbot: object,
+) -> None:
+    board = parse_fen(START)
+    first = next(move for move in legal_moves(board) if move.uci == "h2e2")
+    middle = apply_move(board, first)
+    second = next(move for move in legal_moves(middle) if move.uci == "h7e7")
+    final = apply_move(middle, second)
+    engine = ImmediateEngine()
+    capture_panel = CapturePanel(
+        catalog=OneWindowCatalog(WindowInfo(42, "天天象棋", "x", (1, 1)))
+    )
+    window = MainWindow(
+        engine=engine,
+        coach_client=DeepSeekClient(api_key=None),
+        capture_panel=capture_panel,
+        quick_ms=20,
+        deep_ms=100,
+        enable_live_analysis=True,
+    )
+    qtbot.addWidget(window)  # type: ignore[attr-defined]
+
+    capture_panel.sync_update.emit(
+        LiveSyncUpdate(
+            status=LiveSyncStatus.MOVE_ACCEPTED,
+            board=final,
+            message="atomic double",
+            moves=(first, second),
+            before_position_id=board.position_id,
+            after_position_id=final.position_id,
+            sync_mode=SyncMode.HUMAN_VS_AI,
+        )
+    )
+    qtbot.waitUntil(lambda: len(engine.calls) == 2, timeout=2000)  # type: ignore[attr-defined]
+
+    assert {position_id for position_id, _time_ms in engine.calls} == {
+        final.position_id
+    }
+    assert middle.position_id not in {position_id for position_id, _time_ms in engine.calls}
+    window.close()
+
+
+def test_main_window_rejects_two_ply_event_from_strict_mode(qtbot: object) -> None:
+    board = parse_fen(START)
+    first = next(move for move in legal_moves(board) if move.uci == "h2e2")
+    middle = apply_move(board, first)
+    second = next(move for move in legal_moves(middle) if move.uci == "h7e7")
+    final = apply_move(middle, second)
+    capture_panel = CapturePanel(
+        catalog=OneWindowCatalog(WindowInfo(42, "天天象棋", "x", (1, 1)))
+    )
+    window = MainWindow(
+        engine=ImmediateEngine(),
+        coach_client=DeepSeekClient(api_key=None),
+        capture_panel=capture_panel,
+    )
+    qtbot.addWidget(window)  # type: ignore[attr-defined]
+
+    capture_panel.sync_update.emit(
+        LiveSyncUpdate(
+            status=LiveSyncStatus.MOVE_ACCEPTED,
+            board=final,
+            message="unsafe strict double",
+            moves=(first, second),
+            before_position_id=board.position_id,
+            after_position_id=final.position_id,
+            sync_mode=SyncMode.STRICT_SINGLE,
+        )
+    )
+
+    assert window.board_widget.board == board
     window.close()
 
 

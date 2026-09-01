@@ -12,6 +12,7 @@ from xiangqi_agent.domain.fen import parse_fen
 from xiangqi_agent.domain.rules import apply_move, legal_moves
 from xiangqi_agent.platform.windows import WindowInfo
 from xiangqi_agent.sync.live_session import LiveSyncStatus
+from xiangqi_agent.sync.mode import SyncMode
 from xiangqi_agent.ui.capture_panel import CapturePanel, _default_source_factory
 
 START = "rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w"
@@ -152,6 +153,46 @@ def test_capture_panel_emits_rule_confirmed_board_updates(qtbot: object) -> None
     assert accepted.board == after
     assert "已同步" in panel.status_label.text()
     panel.close_capture()
+
+
+def test_capture_panel_requires_explicit_mode_and_locks_it_while_connected(
+    qtbot: object,
+) -> None:
+    board = parse_fen(START)
+    target = WindowInfo(42, "天天象棋", "WeChatAppEx.exe", (216, 240))
+    source = FakeFrameSource(target.hwnd)
+    panel = CapturePanel(
+        catalog=FakeCatalog((target,)),
+        source_factory=lambda _: source,
+        board_provider=lambda: board,
+        patch_size=CELL,
+    )
+    updates = []
+    panel.sync_update.connect(updates.append)
+    qtbot.addWidget(panel)  # type: ignore[attr-defined]
+
+    assert panel.mode_combo.currentData() == SyncMode.STRICT_SINGLE.value
+    human_index = panel.mode_combo.findData(SyncMode.HUMAN_VS_AI.value)
+    panel.mode_combo.setCurrentIndex(human_index)
+    panel.refresh_button.click()
+    panel.quad_input.setText(TEST_QUAD)
+    panel.connect_button.click()
+
+    baseline = _render(board)
+    source.push(baseline, 0)
+    source.push(baseline.copy(), 50_000_000)
+    source.push(baseline.copy(), 100_000_000)
+    qtbot.waitUntil(  # type: ignore[attr-defined]
+        lambda: any(update.status is LiveSyncStatus.BASELINE_READY for update in updates),
+        timeout=2000,
+    )
+
+    ready = next(update for update in updates if update.status is LiveSyncStatus.BASELINE_READY)
+    assert ready.sync_mode is SyncMode.HUMAN_VS_AI
+    assert not panel.mode_combo.isEnabled()
+
+    panel.close_capture()
+    assert panel.mode_combo.isEnabled()
 
 
 def test_capture_panel_ignores_queued_updates_from_a_closed_generation(qtbot: object) -> None:

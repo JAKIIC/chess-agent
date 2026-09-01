@@ -30,6 +30,7 @@ from xiangqi_agent.sync.live_session import (
     LiveSyncStatus,
     LiveSyncUpdate,
 )
+from xiangqi_agent.sync.mode import SyncMode
 from xiangqi_agent.vision.geometry import GeometryError, parse_normalized_quad
 
 DEFAULT_QUAD = "0.315,0.132;0.678,0.132;0.678,0.862;0.315,0.862"
@@ -103,6 +104,12 @@ class CapturePanel(QWidget):
         self.orientation_combo = QComboBox()
         self.orientation_combo.addItem("红方在下", Orientation.RED_BOTTOM.value)
         self.orientation_combo.addItem("黑方在下", Orientation.BLACK_BOTTOM.value)
+        self.mode_combo = QComboBox()
+        self.mode_combo.addItem("严格单步", SyncMode.STRICT_SINGLE.value)
+        self.mode_combo.addItem(
+            "人机练习（可同步连续应手）",
+            SyncMode.HUMAN_VS_AI.value,
+        )
         self.status_label = QLabel("尚未选择天天象棋窗口")
         self.status_label.setWordWrap(True)
 
@@ -113,6 +120,7 @@ class CapturePanel(QWidget):
         second_row = QHBoxLayout()
         second_row.addWidget(self.quad_input, 1)
         second_row.addWidget(self.orientation_combo)
+        second_row.addWidget(self.mode_combo)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addLayout(first_row)
@@ -138,6 +146,7 @@ class CapturePanel(QWidget):
         self.refresh_button.setEnabled(True)
         self.quad_input.setEnabled(True)
         self.orientation_combo.setEnabled(True)
+        self.mode_combo.setEnabled(True)
         self.connect_button.setEnabled(bool(self._windows))
         if had_active_session:
             self.session_reset.emit()
@@ -208,6 +217,7 @@ class CapturePanel(QWidget):
         try:
             quad = parse_normalized_quad(self.quad_input.text().strip())
             orientation = Orientation(str(self.orientation_combo.currentData()))
+            sync_mode = SyncMode(str(self.mode_combo.currentData()))
             source = self._source_factory(self._windows[index])
         except (GeometryError, TypeError, ValueError) as exc:
             self.status_label.setText(f"四角标定无效：{exc}")
@@ -237,6 +247,7 @@ class CapturePanel(QWidget):
                 board,
                 quad,
                 on_update=forward,
+                sync_mode=sync_mode,
                 patch_size=self._patch_size,
             )
         self.connect_button.setText("断开")
@@ -244,6 +255,7 @@ class CapturePanel(QWidget):
         self.refresh_button.setEnabled(False)
         self.quad_input.setEnabled(False)
         self.orientation_combo.setEnabled(False)
+        self.mode_combo.setEnabled(False)
         if self._session is not None:
             self._session.start()
         elif self._monitor is not None:
@@ -294,8 +306,9 @@ class CapturePanel(QWidget):
         elif update.status is LiveSyncStatus.WAITING_FOR_ENDPOINT:
             self.status_label.setText("已看到棋子点选，正在等待完成走棋…")
         elif update.status is LiveSyncStatus.MOVE_ACCEPTED:
-            move = update.move.uci if update.move is not None else "未知"
-            self.status_label.setText(f"已同步一步：{move}")
+            moves = " · ".join(move.uci for move in update.moves)
+            count = "两步" if len(update.moves) == 2 else "一步"
+            self.status_label.setText(f"已同步{count}：{moves or '未知'}")
         elif update.status is LiveSyncStatus.RECOVERY_PENDING:
             self.status_label.setText("同步恢复已请求，正在等待新的稳定画面")
         elif update.status is LiveSyncStatus.RECOVERY_ACCEPTED:
