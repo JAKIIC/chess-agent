@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from math import isfinite
 from typing import Protocol
 
 import numpy as np
@@ -13,6 +12,10 @@ from xiangqi_agent.sync.evidence import (
     MoveSequenceProposal,
     ObservationStatus,
     SequenceCandidateEvidence,
+)
+from xiangqi_agent.sync.sequence_gate import (
+    SequenceDecisionGate,
+    SequenceThresholdProfile,
 )
 from xiangqi_agent.vision.geometry import BoardGeometry
 from xiangqi_agent.vision.templates import PieceTemplateBank, TemplateMatch
@@ -48,31 +51,19 @@ class LegalTwoPlyDiffObserver:
     ) -> None:
         if isinstance(patch_size, bool) or not isinstance(patch_size, int) or patch_size <= 0:
             raise ValueError("patch_size must be a positive integer")
-        positive_thresholds = (
-            min_local_difference,
-            max_unexpected_difference,
-            min_score,
-            min_margin,
-            max_template_distance,
-            min_template_margin,
-        )
-        if any(not isfinite(value) or value <= 0 for value in positive_thresholds):
-            raise ValueError("sequence thresholds must be finite and positive")
-        if (
-            not isfinite(min_template_confidence)
-            or not 0 < min_template_confidence <= 1
-        ):
-            raise ValueError(
-                "min_template_confidence must be finite and between zero and one"
-            )
         self._patch_size = patch_size
-        self._min_local_difference = min_local_difference
-        self._max_unexpected_difference = max_unexpected_difference
-        self._min_score = min_score
-        self._min_margin = min_margin
-        self._max_template_distance = max_template_distance
-        self._min_template_margin = min_template_margin
-        self._min_template_confidence = min_template_confidence
+        self._gate = SequenceDecisionGate(
+            SequenceThresholdProfile(
+                min_local_difference=min_local_difference,
+                max_unexpected_difference=max_unexpected_difference,
+                min_score=min_score,
+                min_margin=min_margin,
+                max_template_distance=max_template_distance,
+                min_template_margin=min_template_margin,
+                min_template_confidence=min_template_confidence,
+                profile_version="human-ai-two-ply-v1",
+            )
+        )
         self._committer = committer or RuleStateCommitter()
 
     def observe(
@@ -85,7 +76,7 @@ class LegalTwoPlyDiffObserver:
         before_patches = geometry.crop_intersections(before, size=self._patch_size)
         after_patches = geometry.crop_intersections(after, size=self._patch_size)
         local = _local_differences(before_patches, after_patches)
-        if max(local, default=0.0) < self._min_local_difference:
+        if max(local, default=0.0) < self._gate.profile.min_local_difference:
             return _proposal(ObservationStatus.NO_CHANGE, (), local, ())
 
         templates = PieceTemplateBank.from_position(
@@ -154,34 +145,21 @@ class LegalTwoPlyDiffObserver:
                 ),
             )
         )
-        if not ranked:
-            reason = "template_unavailable" if template_unavailable else "no_legal_candidates"
-            return _proposal(ObservationStatus.AMBIGUOUS, ranked, local, (reason,))
-
-        best = ranked[0]
-        next_score = ranked[1].score if len(ranked) > 1 else 0.0
-        reasons: list[str] = []
-        if best.expected_change_floor < self._min_local_difference:
-            reasons.append("expected_change")
-        if best.unexpected_difference > self._max_unexpected_difference:
-            reasons.append("outside_change")
-        if best.score < self._min_score:
-            reasons.append("candidate_score")
-        if best.score - next_score < self._min_margin:
-            reasons.append("candidate_margin")
-        if best.maximum_template_distance > self._max_template_distance:
-            reasons.append("template_distance")
-        if best.minimum_template_margin < self._min_template_margin:
-            reasons.append("template_margin")
-        if best.minimum_template_confidence < self._min_template_confidence:
-            reasons.append("template_confidence")
-        if reasons:
+        decision = self._gate.evaluate(
+            ranked,
+            template_unavailable=template_unavailable,
+        )
+        if not decision.accepted:
             return _proposal(
                 ObservationStatus.AMBIGUOUS,
                 ranked,
                 local,
-                tuple(reasons),
+                decision.rejection_reasons,
             )
+
+        best = decision.candidate
+        if best is None:
+            raise RuntimeError("accepted sequence decision did not expose a candidate")
 
         visual_confidence = best.expected_change_floor / (
             best.expected_change_floor + best.unexpected_difference + 1.0
