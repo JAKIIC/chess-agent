@@ -47,7 +47,7 @@ def _candidate(
 ) -> StageCCandidateRecord:
     return StageCCandidateRecord(
         moves_uci=moves_uci,
-        changed_points=(19, 22, 64, 67),
+        changed_points=(22, 25, 67, 70),
         expected_change_floor=20.0,
         unexpected_difference=1.0,
         maximum_template_distance=0.05,
@@ -70,7 +70,7 @@ def _sample(
     observed_status: StageCObservedStatus = StageCObservedStatus.ACCEPTED,
     observed_moves_uci: tuple[str, ...] = ("h2e2", "h7e7"),
     observed_final_position_id: str | None = FINAL_ID,
-    changed_points: tuple[int, ...] = (19, 22, 64, 67),
+    changed_points: tuple[int, ...] = (22, 25, 67, 70),
     candidates: tuple[StageCCandidateRecord, ...] = (_candidate(),),
     rejection_reasons: tuple[str, ...] = (),
 ) -> HumanAiStageCSampleV1:
@@ -111,13 +111,13 @@ def _rejected_sample(**changes: object) -> HumanAiStageCSampleV1:
         "observed_final_position_id": START_ID,
         "changed_points": (64,),
         "candidates": (),
-        "rejection_reasons": ("outside_change",),
+        "rejection_reasons": ("no_legal_candidates",),
     }
     values.update(changes)
     return _sample(**values)  # type: ignore[arg-type]
 
 
-def _crops(points: tuple[int, ...] = (19, 22, 64, 67)) -> tuple[TransitionPointCrops, ...]:
+def _crops(points: tuple[int, ...] = (22, 25, 67, 70)) -> tuple[TransitionPointCrops, ...]:
     records = []
     for offset, point in enumerate(points):
         before = np.full((48, 48, 4), 20 + offset, dtype=np.uint8)
@@ -186,14 +186,14 @@ def test_stage_c_recorder_writes_only_declared_small_crops_and_manifest(
 
     assert sorted(path.name for path in sample_dir.iterdir()) == [
         "manifest.json",
-        "point-19-after.png",
-        "point-19-before.png",
         "point-22-after.png",
         "point-22-before.png",
-        "point-64-after.png",
-        "point-64-before.png",
+        "point-25-after.png",
+        "point-25-before.png",
         "point-67-after.png",
         "point-67-before.png",
+        "point-70-after.png",
+        "point-70-before.png",
     ]
     manifest_text = (sample_dir / "manifest.json").read_text("utf-8")
     manifest = json.loads(manifest_text)
