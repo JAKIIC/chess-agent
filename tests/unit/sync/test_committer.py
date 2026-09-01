@@ -8,6 +8,10 @@ from xiangqi_agent.sync.committer import RuleStateCommitter
 START = "rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w"
 
 
+def _move(board, uci: str) -> Move:
+    return next(move for move in legal_moves(board) if move.uci == uci)
+
+
 def test_rule_committer_advances_only_a_legal_move() -> None:
     board = parse_fen(START)
     move = next(move for move in legal_moves(board) if move.uci == "h2e2")
@@ -26,3 +30,26 @@ def test_rule_committer_rejects_an_illegal_move_without_mutating_board() -> None
         RuleStateCommitter().commit(board, Move("a0a9", 81, 0))
 
     assert board.position_id == parse_fen(START).position_id
+
+
+def test_rule_committer_projects_two_legal_plies_without_mutating_input() -> None:
+    board = parse_fen(START)
+    first = _move(board, "h2e2")
+    after_first = RuleStateCommitter().commit(board, first)
+    second = _move(after_first, "h7e7")
+
+    projected = RuleStateCommitter().project(board, (first, second))
+
+    assert projected == RuleStateCommitter().commit(after_first, second)
+    assert board == parse_fen(START)
+
+
+def test_rule_committer_rejects_whole_sequence_when_second_move_is_illegal() -> None:
+    board = parse_fen(START)
+    first = _move(board, "h2e2")
+    illegal_second = Move("a0a9", 81, 0)
+
+    with pytest.raises(ValueError, match="legal move"):
+        RuleStateCommitter().commit_sequence(board, (first, illegal_second))
+
+    assert board == parse_fen(START)
