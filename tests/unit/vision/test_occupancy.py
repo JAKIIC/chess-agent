@@ -199,6 +199,26 @@ def test_known_position_observer_rejects_an_unseparated_uniform_baseline() -> No
     assert comparison.low_confidence_points == tuple(range(90))
 
 
+def test_known_position_observer_rejects_a_one_move_ahead_baseline() -> None:
+    move = next(move for move in legal_moves(START_BOARD) if move.uci == "h2e2")
+    moved_board = apply_move(START_BOARD, move)
+    moved, geometry = _render_board(
+        moved_board,
+        (900, 1000),
+        Orientation.RED_BOTTOM,
+    )
+
+    evidence = KnownPositionOccupancyObserver(START_BOARD).observe(moved, geometry)
+    comparison = compare_occupancy(
+        evidence,
+        START_BOARD,
+        minimum_confidence=0.65,
+    )
+
+    assert not comparison.accepted
+    assert comparison.low_confidence_points == tuple(range(90))
+
+
 def _evidence_for(board: BoardState, *, confidence: float) -> OccupancyEvidence:
     return OccupancyEvidence(
         tuple(piece != "." for piece in board.pieces),
