@@ -188,7 +188,47 @@ def test_live_session_emits_atomic_two_ply_event_only_in_human_ai_mode() -> None
     assert accepted.before_position_id == board.position_id
     assert accepted.after_position_id == final.position_id
     assert accepted.sync_mode is SyncMode.HUMAN_VS_AI
+    assert accepted.transition_evidence is None
     assert session.board == final
+    session.close()
+
+
+def test_live_session_forwards_explicit_transition_capture_evidence() -> None:
+    board = parse_fen(START)
+    first = _move(board, "h2e2")
+    middle = apply_move(board, first)
+    second = _move(middle, "h7e7")
+    final = apply_move(middle, second)
+    source = FakeFrameSource(hwnd=42)
+    updates = []
+    session = LiveSyncSession(
+        source,
+        board,
+        QUAD,
+        on_update=updates.append,
+        sync_mode=SyncMode.HUMAN_VS_AI,
+        patch_size=CELL,
+        settle_ms=100,
+        stable_pairs=2,
+        capture_transition_evidence=True,
+    )
+
+    session.start()
+    baseline = _render(board)
+    source.push(baseline, 0)
+    source.push(baseline.copy(), 50_000_000)
+    source.push(baseline.copy(), 100_000_000)
+    _wait_until(lambda: any(update.status is LiveSyncStatus.BASELINE_READY for update in updates))
+
+    merged = _render(final)
+    source.push(merged, 150_000_000)
+    source.push(merged.copy(), 260_000_000)
+    _wait_until(lambda: any(update.status is LiveSyncStatus.MOVE_ACCEPTED for update in updates))
+
+    accepted = next(update for update in updates if update.status is LiveSyncStatus.MOVE_ACCEPTED)
+    assert accepted.transition_evidence is not None
+    assert accepted.transition_evidence.changed_points == (22, 25, 67, 70)
+    assert len(accepted.transition_evidence.crops) == 4
     session.close()
 
 

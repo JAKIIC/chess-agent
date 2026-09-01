@@ -124,8 +124,29 @@ class BoardGeometry:
         frame: NDArray[np.generic],
         size: int = 48,
     ) -> tuple[NDArray[np.uint8], ...]:
+        return self.crop_selected_intersections(frame, tuple(range(90)), size=size)
+
+    def crop_selected_intersections(
+        self,
+        frame: NDArray[np.generic],
+        point_indices: tuple[int, ...],
+        *,
+        size: int = 48,
+    ) -> tuple[NDArray[np.uint8], ...]:
         if isinstance(size, bool) or not isinstance(size, int) or size <= 0:
             raise GeometryError("crop size must be a positive integer")
+        if (
+            not isinstance(point_indices, tuple)
+            or not point_indices
+            or len(set(point_indices)) != len(point_indices)
+            or any(
+                isinstance(index, bool)
+                or not isinstance(index, int)
+                or not 0 <= index < 90
+                for index in point_indices
+            )
+        ):
+            raise GeometryError("point indices must be unique board indices from zero through 89")
         pixels = np.asarray(frame)
         if pixels.dtype != np.uint8 or pixels.ndim != 3 or pixels.shape[2] != 4:
             raise GeometryError("frame must be a BGRA uint8 image")
@@ -152,12 +173,18 @@ class BoardGeometry:
             ),
             dtype=np.uint8,
         )
-        patches: tuple[NDArray[np.uint8], ...] = tuple(
-            warped[row * size : (row + 1) * size, column * size : (column + 1) * size].copy()
-            for row in range(10)
-            for column in range(9)
+        physical_indices = (
+            point_indices
+            if self.orientation is Orientation.RED_BOTTOM
+            else tuple(89 - index for index in point_indices)
         )
-        return patches if self.orientation is Orientation.RED_BOTTOM else tuple(reversed(patches))
+        return tuple(
+            warped[
+                (physical_index // 9) * size : (physical_index // 9 + 1) * size,
+                (physical_index % 9) * size : (physical_index % 9 + 1) * size,
+            ].copy()
+            for physical_index in physical_indices
+        )
 
     def _pixel_corners(self) -> tuple[Point, Point, Point, Point]:
         width, height = self.frame_size

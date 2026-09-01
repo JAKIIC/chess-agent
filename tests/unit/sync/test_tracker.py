@@ -17,6 +17,7 @@ from xiangqi_agent.sync.mode import SyncMode
 from xiangqi_agent.sync.move_observer import LegalMoveDiffObserver
 from xiangqi_agent.sync.sequence_observer import LegalTwoPlyDiffObserver
 from xiangqi_agent.sync.tracker import StableMoveTracker, TrackingStatus
+from xiangqi_agent.sync.transition_capture import TransitionCaptureEvidence
 from xiangqi_agent.vision.geometry import BoardGeometry, NormalizedQuad
 
 START = "rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w"
@@ -55,6 +56,7 @@ def _tracker(
     mode: SyncMode = SyncMode.STRICT_SINGLE,
     sequence_observer: object | None = None,
     committer: object | None = None,
+    capture_transition_evidence: bool = False,
 ) -> StableMoveTracker:
     return StableMoveTracker(
         board,
@@ -65,6 +67,7 @@ def _tracker(
         sequence_observer=sequence_observer,
         required_stable_pairs=2,
         patch_size=CELL,
+        capture_transition_evidence=capture_transition_evidence,
     )
 
 
@@ -155,6 +158,100 @@ def test_human_ai_tracker_atomically_accepts_unique_two_ply_fallback() -> None:
     assert result.board == final
 
 
+def test_transition_capture_is_disabled_by_default_without_calling_builder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    board = parse_fen(START)
+    move = _move(board, "h2e2")
+    tracker = _tracker(board)
+    tracker.initialize(_render(board))
+
+    def fail_if_called(*_args: object, **_kwargs: object) -> TransitionCaptureEvidence:
+        raise AssertionError("disabled transition capture must not build crop evidence")
+
+    monkeypatch.setattr(
+        "xiangqi_agent.sync.tracker.build_transition_capture_evidence",
+        fail_if_called,
+    )
+
+    result = _settle(tracker, _render(apply_move(board, move)))
+
+    assert result.status is TrackingStatus.ACCEPTED
+    assert result.transition_evidence is None
+
+
+def test_enabled_transition_capture_keeps_only_owned_top_four_point_crops() -> None:
+    board = parse_fen(START)
+    first = _move(board, "h2e2")
+    middle = apply_move(board, first)
+    second = _move(middle, "h7e7")
+    final = apply_move(middle, second)
+    baseline = _render(board)
+    final_frame = _render(final)
+    tracker = _tracker(
+        board,
+        mode=SyncMode.HUMAN_VS_AI,
+        sequence_observer=LegalTwoPlyDiffObserver(patch_size=CELL),
+        capture_transition_evidence=True,
+    )
+    tracker.initialize(baseline)
+
+    result = _settle(tracker, final_frame)
+    evidence = result.transition_evidence
+
+    assert result.status is TrackingStatus.ACCEPTED
+    assert evidence is not None
+    assert evidence.changed_points == (22, 25, 67, 70)
+    assert len(evidence.local_differences) == 90
+    assert evidence.decision_latency_ms >= 0.0
+    assert tuple(crop.point_index for crop in evidence.crops) == evidence.changed_points
+    before_copy = tuple(crop.before.copy() for crop in evidence.crops)
+    after_copy = tuple(crop.after.copy() for crop in evidence.crops)
+    assert all(crop.before.shape == (48, 48, 4) for crop in evidence.crops)
+    assert all(crop.after.shape == (48, 48, 4) for crop in evidence.crops)
+    assert all(not crop.before.flags.writeable for crop in evidence.crops)
+    assert all(not crop.after.flags.writeable for crop in evidence.crops)
+
+    baseline[...] = 255
+    final_frame[...] = 0
+
+    assert all(
+        np.array_equal(crop.before, expected)
+        for crop, expected in zip(evidence.crops, before_copy, strict=True)
+    )
+    assert all(
+        np.array_equal(crop.after, expected)
+        for crop, expected in zip(evidence.crops, after_copy, strict=True)
+    )
+
+
+def test_transition_latency_uses_the_final_capture_timestamp_when_clocks_match(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    board = parse_fen(START)
+    first = _move(board, "h2e2")
+    middle = apply_move(board, first)
+    second = _move(middle, "h7e7")
+    final_frame = _render(apply_move(middle, second))
+    tracker = _tracker(
+        board,
+        mode=SyncMode.HUMAN_VS_AI,
+        capture_transition_evidence=True,
+    )
+    tracker.initialize(_render(board))
+    tracker.push(final_frame)
+    tracker.push(final_frame.copy())
+    monkeypatch.setattr("xiangqi_agent.sync.tracker.perf_counter_ns", lambda: 10_000_000_000)
+
+    result = tracker.push(
+        final_frame.copy(),
+        capture_timestamp_ns=9_500_000_000,
+    )
+
+    assert result.transition_evidence is not None
+    assert result.transition_evidence.decision_latency_ms == 500.0
+
+
 def test_human_ai_tracker_rejects_sequence_whose_evidence_final_id_is_wrong() -> None:
     board = parse_fen(START)
     first = _move(board, "h2e2")
@@ -199,6 +296,10 @@ def test_human_ai_tracker_rejects_sequence_whose_evidence_final_id_is_wrong() ->
     assert result.status is TrackingStatus.PAUSED_AMBIGUOUS
     assert result.moves == ()
     assert result.board == board
+    assert isinstance(result.observation, MoveSequenceProposal)
+    assert result.observation.status is ObservationStatus.AMBIGUOUS
+    assert result.observation.moves == ()
+    assert "final_position_mismatch" in result.observation.evidence.rejection_reasons
 
 
 def test_human_ai_tracker_does_not_publish_first_move_when_atomic_commit_fails() -> None:
@@ -226,6 +327,10 @@ def test_human_ai_tracker_does_not_publish_first_move_when_atomic_commit_fails()
     assert result.moves == ()
     assert result.board == board
     assert tracker.board == board
+    assert isinstance(result.observation, MoveSequenceProposal)
+    assert result.observation.status is ObservationStatus.AMBIGUOUS
+    assert result.observation.moves == ()
+    assert "sequence_commit_failed" in result.observation.evidence.rejection_reasons
 
 
 def test_human_ai_tracker_keeps_two_single_events_when_a_stable_platform_exists() -> None:
@@ -413,6 +518,10 @@ def test_tracker_rejects_an_observer_supplied_illegal_move_without_changing_boar
     assert result.status is TrackingStatus.PAUSED_AMBIGUOUS
     assert result.board == board
     assert result.move is None
+    assert isinstance(result.observation, MoveProposal)
+    assert result.observation.status is ObservationStatus.AMBIGUOUS
+    assert result.observation.move is None
+    assert "rule_commit_failed" in result.observation.evidence.rejection_reasons
 
 
 def test_tracker_context_invalidation_blocks_frames_until_explicit_recovery() -> None:

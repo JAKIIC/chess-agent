@@ -24,6 +24,7 @@ from xiangqi_agent.sync.mode import SyncMode
 from xiangqi_agent.sync.move_observer import LegalMoveDiffObserver
 from xiangqi_agent.sync.sequence_observer import LegalTwoPlyDiffObserver
 from xiangqi_agent.sync.tracker import StableMoveTracker, TrackingStatus, TrackingUpdate
+from xiangqi_agent.sync.transition_capture import TransitionCaptureEvidence
 from xiangqi_agent.vision.change_detection import FrameStabilityDetector
 from xiangqi_agent.vision.geometry import BoardGeometry, NormalizedQuad
 
@@ -58,6 +59,7 @@ class LiveSyncUpdate:
     recovery_id: int | None = None
     frame_size: tuple[int, int] | None = None
     point_count: int = 0
+    transition_evidence: TransitionCaptureEvidence | None = None
 
     @property
     def move(self) -> Move | None:
@@ -145,11 +147,14 @@ class LiveSyncSession:
         settle_ms: int = 100,
         stable_pairs: int = 2,
         patch_size: int = 48,
+        capture_transition_evidence: bool = False,
     ) -> None:
         if stable_pairs <= 0:
             raise ValueError("stable_pairs must be positive")
         if not isinstance(sync_mode, SyncMode):
             raise TypeError("sync_mode must be a SyncMode")
+        if not isinstance(capture_transition_evidence, bool):
+            raise TypeError("capture_transition_evidence must be a boolean")
         self._source = source
         self._board = board
         self._quad = quad
@@ -159,6 +164,7 @@ class LiveSyncSession:
         self._settle_ms = settle_ms
         self._stable_pairs = stable_pairs
         self._patch_size = patch_size
+        self._capture_transition_evidence = capture_transition_evidence
         self._events = _CoalescingEventQueue(max_frames=3)
         self._lock = Lock()
         self._processing_lock = Lock()
@@ -322,6 +328,7 @@ class LiveSyncSession:
                         ),
                         required_stable_pairs=self._stable_pairs,
                         patch_size=self._patch_size,
+                        capture_transition_evidence=self._capture_transition_evidence,
                     )
                     tracker.initialize(event.bgra)
                     sampler = AdaptiveBurstSampler(
@@ -384,7 +391,10 @@ class LiveSyncSession:
     ) -> None:
         for sample in samples:
             before_position_id = tracker.board.position_id
-            update = tracker.push(sample.bgra)
+            update = tracker.push(
+                sample.bgra,
+                capture_timestamp_ns=sample.timestamp_ns,
+            )
             _set_sampling_mode(sampler, self._source, update.status)
             if update.status is TrackingStatus.ACCEPTED:
                 with self._lock:
@@ -506,6 +516,7 @@ class LiveSyncSession:
                 recovery_id=recovery_id,
                 frame_size=frame_size,
                 point_count=90,
+                transition_evidence=update.transition_evidence,
             )
         )
 

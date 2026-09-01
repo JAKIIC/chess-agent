@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
+from time import perf_counter_ns
 
 import numpy as np
 from numpy.typing import NDArray
@@ -18,6 +19,10 @@ from xiangqi_agent.sync.move_observer import MoveObserver
 from xiangqi_agent.sync.sequence_observer import (
     LegalTwoPlyDiffObserver,
     MoveSequenceObserver,
+)
+from xiangqi_agent.sync.transition_capture import (
+    TransitionCaptureEvidence,
+    build_transition_capture_evidence,
 )
 from xiangqi_agent.vision.change_detection import analyze_frame_change
 from xiangqi_agent.vision.geometry import BoardGeometry, GeometryError
@@ -41,6 +46,7 @@ class TrackingUpdate:
     board: BoardState
     moves: tuple[Move, ...] = ()
     observation: MoveProposal | MoveSequenceProposal | None = None
+    transition_evidence: TransitionCaptureEvidence | None = None
 
     @property
     def move(self) -> Move | None:
@@ -63,11 +69,14 @@ class StableMoveTracker:
         global_threshold: float = 1.5,
         local_threshold: float = 3.0,
         patch_size: int = 32,
+        capture_transition_evidence: bool = False,
     ) -> None:
         if required_stable_pairs <= 0:
             raise ValueError("required_stable_pairs must be positive")
         if not isinstance(mode, SyncMode):
             raise TypeError("mode must be a SyncMode")
+        if not isinstance(capture_transition_evidence, bool):
+            raise TypeError("capture_transition_evidence must be a boolean")
         self._board = board
         self._geometry = geometry
         self._observer = observer
@@ -76,6 +85,7 @@ class StableMoveTracker:
         self._global_threshold = global_threshold
         self._local_threshold = local_threshold
         self._patch_size = patch_size
+        self._capture_transition_evidence = capture_transition_evidence
         self._mode = mode
         self._sequence_observer = sequence_observer
         if self._mode is SyncMode.HUMAN_VS_AI and self._sequence_observer is None:
@@ -106,9 +116,20 @@ class StableMoveTracker:
         self._blocked_status = None
         return TrackingUpdate(TrackingStatus.WATCHING, self._board)
 
-    def push(self, frame: NDArray[np.generic]) -> TrackingUpdate:
+    def push(
+        self,
+        frame: NDArray[np.generic],
+        *,
+        capture_timestamp_ns: int | None = None,
+    ) -> TrackingUpdate:
         if self._confirmed_frame is None or self._previous_frame is None:
             raise RuntimeError("tracker must be initialized with a confirmed frame")
+        if capture_timestamp_ns is not None and (
+            isinstance(capture_timestamp_ns, bool)
+            or not isinstance(capture_timestamp_ns, int)
+            or capture_timestamp_ns < 0
+        ):
+            raise ValueError("capture_timestamp_ns must be a non-negative integer")
         if self._blocked_status is not None:
             if self._blocked_status in (
                 TrackingStatus.PAUSED_AMBIGUOUS,
@@ -140,6 +161,7 @@ class StableMoveTracker:
         if self._stable_pairs < self._required_stable_pairs:
             return TrackingUpdate(TrackingStatus.WAITING_FOR_STABLE, self._board)
 
+        decision_started_ns = perf_counter_ns()
         observation = self._observer.observe(
             self._board,
             self._confirmed_frame,
@@ -148,11 +170,27 @@ class StableMoveTracker:
         )
         if observation.status is ObservationStatus.ACCEPTED:
             if observation.move is None:
-                return self._pause(observation)
+                return self._pause(
+                    _failed_observation(observation, "proposal_missing_move"),
+                    current,
+                    decision_started_ns,
+                    capture_timestamp_ns,
+                )
             try:
                 verified_after = self._committer.commit(self._board, observation.move)
             except ValueError:
-                return self._pause(observation)
+                return self._pause(
+                    _failed_observation(observation, "rule_commit_failed"),
+                    current,
+                    decision_started_ns,
+                    capture_timestamp_ns,
+                )
+            transition_evidence = self._build_transition_evidence(
+                observation,
+                current,
+                decision_started_ns,
+                capture_timestamp_ns,
+            )
             self._board = verified_after
             self._confirmed_frame = current.copy()
             self._motion_seen = False
@@ -162,6 +200,7 @@ class StableMoveTracker:
                 self._board,
                 (observation.move,),
                 observation,
+                transition_evidence,
             )
         if observation.status is ObservationStatus.NO_CHANGE:
             self._confirmed_frame = current.copy()
@@ -180,7 +219,12 @@ class StableMoveTracker:
         if self._can_try_sequence(observation):
             sequence_observer = self._sequence_observer
             if sequence_observer is None:
-                return self._pause(observation)
+                return self._pause(
+                    observation,
+                    current,
+                    decision_started_ns,
+                    capture_timestamp_ns,
+                )
             sequence = sequence_observer.observe(
                 self._board,
                 self._confirmed_frame,
@@ -193,19 +237,40 @@ class StableMoveTracker:
                     not sequence.evidence.candidates
                     or sequence.evidence.candidates[0].moves != sequence_moves
                 ):
-                    return self._pause(sequence)
+                    return self._pause(
+                        _failed_observation(sequence, "candidate_evidence_mismatch"),
+                        current,
+                        decision_started_ns,
+                        capture_timestamp_ns,
+                    )
                 try:
                     verified_after = self._committer.commit_sequence(
                         self._board,
                         sequence_moves,
                     )
                 except (IndexError, ValueError):
-                    return self._pause(sequence)
+                    return self._pause(
+                        _failed_observation(sequence, "sequence_commit_failed"),
+                        current,
+                        decision_started_ns,
+                        capture_timestamp_ns,
+                    )
                 if (
                     verified_after.position_id
                     != sequence.evidence.candidates[0].final_position_id
                 ):
-                    return self._pause(sequence)
+                    return self._pause(
+                        _failed_observation(sequence, "final_position_mismatch"),
+                        current,
+                        decision_started_ns,
+                        capture_timestamp_ns,
+                    )
+                transition_evidence = self._build_transition_evidence(
+                    sequence,
+                    current,
+                    decision_started_ns,
+                    capture_timestamp_ns,
+                )
                 self._board = verified_after
                 self._confirmed_frame = current.copy()
                 self._motion_seen = False
@@ -215,10 +280,21 @@ class StableMoveTracker:
                     self._board,
                     sequence_moves,
                     sequence,
+                    transition_evidence,
                 )
-            return self._pause(sequence)
+            return self._pause(
+                sequence,
+                current,
+                decision_started_ns,
+                capture_timestamp_ns,
+            )
 
-        return self._pause(observation)
+        return self._pause(
+            observation,
+            current,
+            decision_started_ns,
+            capture_timestamp_ns,
+        )
 
     def _can_try_sequence(self, observation: MoveProposal) -> bool:
         if self._mode is not SyncMode.HUMAN_VS_AI:
@@ -229,12 +305,47 @@ class StableMoveTracker:
     def _pause(
         self,
         observation: MoveProposal | MoveSequenceProposal,
+        current: NDArray[np.uint8],
+        decision_started_ns: int,
+        capture_timestamp_ns: int | None,
     ) -> TrackingUpdate:
         self._blocked_status = TrackingStatus.PAUSED_AMBIGUOUS
         return TrackingUpdate(
             TrackingStatus.PAUSED_AMBIGUOUS,
             self._board,
             observation=observation,
+            transition_evidence=self._build_transition_evidence(
+                observation,
+                current,
+                decision_started_ns,
+                capture_timestamp_ns,
+            ),
+        )
+
+    def _build_transition_evidence(
+        self,
+        observation: MoveProposal | MoveSequenceProposal,
+        current: NDArray[np.uint8],
+        decision_started_ns: int,
+        capture_timestamp_ns: int | None,
+    ) -> TransitionCaptureEvidence | None:
+        if not self._capture_transition_evidence:
+            return None
+        confirmed = self._confirmed_frame
+        if confirmed is None:
+            raise RuntimeError("transition capture requires a confirmed frame")
+        completed_ns = perf_counter_ns()
+        latency_origin_ns = (
+            capture_timestamp_ns
+            if capture_timestamp_ns is not None and capture_timestamp_ns <= completed_ns
+            else decision_started_ns
+        )
+        return build_transition_capture_evidence(
+            confirmed,
+            current,
+            self._geometry,
+            observation.evidence.local_differences,
+            decision_latency_ms=(completed_ns - latency_origin_ns) / 1_000_000,
         )
 
     def invalidate_context(self) -> TrackingUpdate:
@@ -316,3 +427,30 @@ def _is_incomplete_endpoint_transition(observation: MoveProposal) -> bool:
     source_missing = "source_change" in reasons
     destination_missing = "destination_change" in reasons
     return source_missing != destination_missing
+
+
+def _failed_observation(
+    observation: MoveProposal | MoveSequenceProposal,
+    reason: str,
+) -> MoveProposal | MoveSequenceProposal:
+    reasons = observation.evidence.rejection_reasons
+    updated_reasons = reasons if reason in reasons else (*reasons, reason)
+    if isinstance(observation, MoveProposal):
+        return MoveProposal(
+            status=ObservationStatus.AMBIGUOUS,
+            move=None,
+            evidence_score=0.0,
+            evidence=replace(
+                observation.evidence,
+                rejection_reasons=updated_reasons,
+            ),
+        )
+    return MoveSequenceProposal(
+        status=ObservationStatus.AMBIGUOUS,
+        moves=(),
+        evidence_score=0.0,
+        evidence=replace(
+            observation.evidence,
+            rejection_reasons=updated_reasons,
+        ),
+    )

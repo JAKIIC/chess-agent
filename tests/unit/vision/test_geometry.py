@@ -74,6 +74,57 @@ def test_crop_intersections_returns_owned_ordered_patches_and_rejects_resize() -
         geometry.crop_intersections(np.zeros((height + 1, width, 4), dtype=np.uint8), size=8)
 
 
+def test_crop_selected_intersections_materializes_only_requested_stable_indices() -> None:
+    width, height, patch_size = 73, 81, 8
+    frame = np.zeros((height, width, 4), dtype=np.uint8)
+    frame[..., 3] = 255
+    pixel_quad = ((4, 4), (68, 4), (68, 76), (4, 76))
+    geometry = BoardGeometry.from_quad(
+        NormalizedQuad.from_pixels(pixel_quad, (width, height)),
+        (width, height),
+    )
+    for index, (x, y) in enumerate(geometry.grid_points()):
+        cv2.circle(frame, (round(x), round(y)), 2, (index + 1, 0, 0, 255), thickness=-1)
+
+    selected = geometry.crop_selected_intersections(
+        frame,
+        (4, 22, 67, 81),
+        size=patch_size,
+    )
+
+    assert len(selected) == 4
+    assert [int(patch[patch_size // 2, patch_size // 2, 0]) for patch in selected] == [
+        5,
+        23,
+        68,
+        82,
+    ]
+    assert all(patch.flags["OWNDATA"] for patch in selected)
+
+
+def test_crop_selected_intersections_preserves_logical_order_when_black_is_bottom() -> None:
+    width, height, patch_size = 73, 81, 8
+    frame = np.zeros((height, width, 4), dtype=np.uint8)
+    frame[..., 3] = 255
+    pixel_quad = ((4, 4), (68, 4), (68, 76), (4, 76))
+    red_geometry = BoardGeometry.from_quad(
+        NormalizedQuad.from_pixels(pixel_quad, (width, height)),
+        (width, height),
+    )
+    for index, (x, y) in enumerate(red_geometry.grid_points()):
+        cv2.circle(frame, (round(x), round(y)), 2, (index + 1, 0, 0, 255), thickness=-1)
+    black_geometry = BoardGeometry.from_quad(
+        red_geometry.quad,
+        red_geometry.frame_size,
+        Orientation.BLACK_BOTTOM,
+    )
+
+    selected = black_geometry.crop_selected_intersections(frame, (0, 89), size=patch_size)
+
+    assert int(selected[0][patch_size // 2, patch_size // 2, 0]) == 90
+    assert int(selected[1][patch_size // 2, patch_size // 2, 0]) == 1
+
+
 def test_geometry_rebinds_normalized_quad_when_frame_aspect_ratio_is_stable() -> None:
     geometry = BoardGeometry.from_quad(
         NormalizedQuad(((0.1, 0.1), (0.9, 0.1), (0.9, 0.9), (0.1, 0.9))),
