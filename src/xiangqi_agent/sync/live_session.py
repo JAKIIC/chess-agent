@@ -19,8 +19,10 @@ from xiangqi_agent.capture.protocol import (
     FrameSource,
 )
 from xiangqi_agent.domain.board import BoardState, Move
-from xiangqi_agent.sync.evidence import MoveProposal
+from xiangqi_agent.sync.evidence import MoveProposal, MoveSequenceProposal
+from xiangqi_agent.sync.mode import SyncMode
 from xiangqi_agent.sync.move_observer import LegalMoveDiffObserver
+from xiangqi_agent.sync.sequence_observer import LegalTwoPlyDiffObserver
 from xiangqi_agent.sync.tracker import StableMoveTracker, TrackingStatus, TrackingUpdate
 from xiangqi_agent.vision.change_detection import FrameStabilityDetector
 from xiangqi_agent.vision.geometry import BoardGeometry, NormalizedQuad
@@ -48,12 +50,18 @@ class LiveSyncUpdate:
     status: LiveSyncStatus
     board: BoardState
     message: str
-    move: Move | None = None
-    observation: MoveProposal | None = None
+    moves: tuple[Move, ...] = ()
+    observation: MoveProposal | MoveSequenceProposal | None = None
     before_position_id: str | None = None
+    after_position_id: str | None = None
+    sync_mode: SyncMode = SyncMode.STRICT_SINGLE
     recovery_id: int | None = None
     frame_size: tuple[int, int] | None = None
     point_count: int = 0
+
+    @property
+    def move(self) -> Move | None:
+        return self.moves[0] if len(self.moves) == 1 else None
 
 
 @dataclass(frozen=True, slots=True)
@@ -132,6 +140,7 @@ class LiveSyncSession:
         quad: NormalizedQuad,
         *,
         on_update: Callable[[LiveSyncUpdate], None] | None = None,
+        sync_mode: SyncMode = SyncMode.STRICT_SINGLE,
         steady_fps: int = 2,
         settle_ms: int = 100,
         stable_pairs: int = 2,
@@ -139,10 +148,13 @@ class LiveSyncSession:
     ) -> None:
         if stable_pairs <= 0:
             raise ValueError("stable_pairs must be positive")
+        if not isinstance(sync_mode, SyncMode):
+            raise TypeError("sync_mode must be a SyncMode")
         self._source = source
         self._board = board
         self._quad = quad
         self._on_update = on_update or _ignore_update
+        self._sync_mode = sync_mode
         self._steady_fps = steady_fps
         self._settle_ms = settle_ms
         self._stable_pairs = stable_pairs
@@ -302,6 +314,12 @@ class LiveSyncSession:
                         self.board,
                         geometry,
                         LegalMoveDiffObserver(patch_size=self._patch_size),
+                        mode=self._sync_mode,
+                        sequence_observer=(
+                            LegalTwoPlyDiffObserver(patch_size=self._patch_size)
+                            if self._sync_mode is SyncMode.HUMAN_VS_AI
+                            else None
+                        ),
                         required_stable_pairs=self._stable_pairs,
                         patch_size=self._patch_size,
                     )
@@ -373,7 +391,11 @@ class LiveSyncSession:
                     self._board = update.board
                 self._emit_tracking(
                     LiveSyncStatus.MOVE_ACCEPTED,
-                    "unique legal move accepted",
+                    (
+                        "unique legal two-ply sequence accepted atomically"
+                        if len(update.moves) == 2
+                        else "unique legal move accepted"
+                    ),
                     update,
                     frame_size=sample.size,
                     before_position_id=before_position_id,
@@ -472,9 +494,15 @@ class LiveSyncSession:
                 status=status,
                 board=update.board,
                 message=message,
-                move=update.move,
+                moves=update.moves,
                 observation=update.observation,
                 before_position_id=before_position_id,
+                after_position_id=(
+                    update.board.position_id
+                    if status in (LiveSyncStatus.MOVE_ACCEPTED, LiveSyncStatus.RECOVERY_ACCEPTED)
+                    else None
+                ),
+                sync_mode=self._sync_mode,
                 recovery_id=recovery_id,
                 frame_size=frame_size,
                 point_count=90,
@@ -497,6 +525,7 @@ class LiveSyncSession:
                 status=status,
                 board=self.board,
                 message=message,
+                sync_mode=self._sync_mode,
                 recovery_id=recovery_id,
                 frame_size=frame_size,
                 point_count=point_count,

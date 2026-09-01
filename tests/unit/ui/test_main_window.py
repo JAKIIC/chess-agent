@@ -253,7 +253,7 @@ def test_main_window_rejects_move_whose_before_position_is_stale(qtbot: object) 
             status=LiveSyncStatus.MOVE_ACCEPTED,
             board=after,
             message="stale move",
-            move=move,
+            moves=(move,),
             before_position_id="not-the-current-position",
         )
     )
@@ -452,7 +452,7 @@ def test_live_move_is_ignored_while_manual_recovery_is_pending(qtbot: object) ->
             status=LiveSyncStatus.MOVE_ACCEPTED,
             board=after,
             message="old move",
-            move=move,
+            moves=(move,),
             before_position_id=board.position_id,
         )
     )

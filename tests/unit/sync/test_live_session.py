@@ -17,6 +17,7 @@ from xiangqi_agent.sync.live_session import (
     LiveSyncStatus,
     _CoalescingEventQueue,
 )
+from xiangqi_agent.sync.mode import SyncMode
 from xiangqi_agent.vision.geometry import parse_normalized_quad
 
 START = "rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w"
@@ -147,6 +148,86 @@ def test_live_session_tracks_multiple_unique_moves_without_restarting() -> None:
     assert session.board == after_black
 
     session.close()
+    session.close()
+
+
+def test_live_session_emits_atomic_two_ply_event_only_in_human_ai_mode() -> None:
+    board = parse_fen(START)
+    first = _move(board, "h2e2")
+    middle = apply_move(board, first)
+    second = _move(middle, "h7e7")
+    final = apply_move(middle, second)
+    source = FakeFrameSource(hwnd=42)
+    updates = []
+    session = LiveSyncSession(
+        source,
+        board,
+        QUAD,
+        on_update=updates.append,
+        sync_mode=SyncMode.HUMAN_VS_AI,
+        patch_size=CELL,
+        settle_ms=100,
+        stable_pairs=2,
+    )
+
+    session.start()
+    baseline = _render(board)
+    source.push(baseline, 0)
+    source.push(baseline.copy(), 50_000_000)
+    source.push(baseline.copy(), 100_000_000)
+    _wait_until(lambda: any(update.status is LiveSyncStatus.BASELINE_READY for update in updates))
+
+    merged = _render(final)
+    source.push(merged, 150_000_000)
+    source.push(merged.copy(), 260_000_000)
+    _wait_until(lambda: any(update.status is LiveSyncStatus.MOVE_ACCEPTED for update in updates))
+
+    accepted = next(update for update in updates if update.status is LiveSyncStatus.MOVE_ACCEPTED)
+    assert accepted.moves == (first, second)
+    assert accepted.move is None
+    assert accepted.before_position_id == board.position_id
+    assert accepted.after_position_id == final.position_id
+    assert accepted.sync_mode is SyncMode.HUMAN_VS_AI
+    assert session.board == final
+    session.close()
+
+
+def test_live_session_defaults_to_strict_and_rejects_a_merged_two_ply_frame() -> None:
+    board = parse_fen(START)
+    first = _move(board, "h2e2")
+    middle = apply_move(board, first)
+    second = _move(middle, "h7e7")
+    final = apply_move(middle, second)
+    source = FakeFrameSource(hwnd=42)
+    updates = []
+    session = LiveSyncSession(
+        source,
+        board,
+        QUAD,
+        on_update=updates.append,
+        patch_size=CELL,
+        settle_ms=100,
+        stable_pairs=2,
+    )
+
+    session.start()
+    baseline = _render(board)
+    source.push(baseline, 0)
+    source.push(baseline.copy(), 50_000_000)
+    source.push(baseline.copy(), 100_000_000)
+    _wait_until(lambda: any(update.status is LiveSyncStatus.BASELINE_READY for update in updates))
+
+    merged = _render(final)
+    source.push(merged, 150_000_000)
+    source.push(merged.copy(), 260_000_000)
+    _wait_until(
+        lambda: any(update.status is LiveSyncStatus.PAUSED_AMBIGUOUS for update in updates)
+    )
+
+    paused = next(update for update in updates if update.status is LiveSyncStatus.PAUSED_AMBIGUOUS)
+    assert paused.sync_mode is SyncMode.STRICT_SINGLE
+    assert paused.moves == ()
+    assert session.board == board
     session.close()
 
 
