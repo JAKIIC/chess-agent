@@ -7,6 +7,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from xiangqi_agent.domain.board import BoardState, Move
+from xiangqi_agent.domain.rules import legal_moves
 from xiangqi_agent.sync.committer import RuleStateCommitter, StateCommitter
 from xiangqi_agent.sync.evidence import (
     MoveSequenceEvidence,
@@ -21,7 +22,7 @@ from xiangqi_agent.sync.sequence_gate import (
 from xiangqi_agent.vision.geometry import BoardGeometry
 from xiangqi_agent.vision.templates import PieceTemplateBank, TemplateMatch
 
-_FEATURE_VERSION = "two-ply-template-v2"
+_FEATURE_VERSION = "two-ply-template-v3"
 _REPLY_CONSTRAINED_FEATURE_VERSION = _FEATURE_VERSION
 
 
@@ -92,7 +93,7 @@ class LegalTwoPlyDiffObserver:
             before,
             after,
             geometry,
-            self._committer.project_two_ply(board),
+            None,
             feature_version=_FEATURE_VERSION,
         )
 
@@ -120,7 +121,7 @@ class LegalTwoPlyDiffObserver:
         before: NDArray[np.generic],
         after: NDArray[np.generic],
         geometry: BoardGeometry,
-        projections: Iterable[tuple[tuple[Move, Move], BoardState]],
+        projections: Iterable[tuple[tuple[Move, Move], BoardState]] | None,
         *,
         feature_version: str,
     ) -> MoveSequenceProposal:
@@ -135,6 +136,9 @@ class LegalTwoPlyDiffObserver:
                 (),
                 feature_version,
             )
+
+        if projections is None:
+            projections = self._project_from_changed_sources(board, local)
 
         templates = PieceTemplateBank.from_position(
             board,
@@ -228,6 +232,21 @@ class LegalTwoPlyDiffObserver:
             evidence_score=min(visual_confidence, best.minimum_template_confidence),
             evidence=MoveSequenceEvidence(ranked, local, (), feature_version),
         )
+
+    def _project_from_changed_sources(
+        self,
+        board: BoardState,
+        local: tuple[float, ...],
+    ) -> Iterable[tuple[tuple[Move, Move], BoardState]]:
+        """Skip chains that cannot satisfy the existing expected-change gate."""
+        minimum = self._gate.profile.min_local_difference
+        for first in legal_moves(board):
+            # A legal first mover's source cannot contain its original piece after
+            # the opponent replies. If that source did not visibly change, every
+            # chain beginning with this move would fail expected_change anyway.
+            if local[first.from_index] < minimum:
+                continue
+            yield from self._committer.project_replies(board, first)
 
 
 def _local_differences(

@@ -95,7 +95,7 @@ def _report(
 
 
 def test_release_gate_targets_the_current_two_ply_feature_version() -> None:
-    assert DEFAULT_STAGE_C_FEATURE_VERSION == "two-ply-template-v2"
+    assert DEFAULT_STAGE_C_FEATURE_VERSION == "two-ply-template-v3"
 
 
 def test_29_valid_events_fail_the_count_gate() -> None:

@@ -46,7 +46,7 @@ _REQUIRED_REJECTION_SCENARIOS = (
     StageCScenario.THREE_PLY,
 )
 
-DEFAULT_STAGE_C_FEATURE_VERSION = "two-ply-template-v2"
+DEFAULT_STAGE_C_FEATURE_VERSION = "two-ply-template-v3"
 DEFAULT_STAGE_C_THRESHOLD_PROFILE = SequenceThresholdProfile(
     min_local_difference=5.0,
     max_unexpected_difference=3.0,

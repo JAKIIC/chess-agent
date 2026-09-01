@@ -1,10 +1,12 @@
 from time import perf_counter
+from unittest.mock import Mock
 
 import numpy as np
 
 from xiangqi_agent.domain.board import BoardState, Move
 from xiangqi_agent.domain.fen import parse_fen
 from xiangqi_agent.domain.rules import apply_move, legal_moves
+from xiangqi_agent.sync.committer import RuleStateCommitter
 from xiangqi_agent.sync.evidence import ObservationStatus
 from xiangqi_agent.sync.sequence_observer import LegalTwoPlyDiffObserver
 from xiangqi_agent.vision.geometry import BoardGeometry, NormalizedQuad
@@ -59,7 +61,7 @@ def test_two_ply_observer_accepts_the_only_legal_chain_matching_final_frame() ->
     assert proposal.status is ObservationStatus.ACCEPTED
     assert proposal.moves == (first, second)
     assert proposal.evidence.candidates[0].final_position_id == final.position_id
-    assert proposal.evidence.feature_version == "two-ply-template-v2"
+    assert proposal.evidence.feature_version == "two-ply-template-v3"
 
 
 def test_two_ply_observer_only_scores_replies_after_a_confirmed_first_move() -> None:
@@ -79,10 +81,37 @@ def test_two_ply_observer_only_scores_replies_after_a_confirmed_first_move() -> 
 
     assert proposal.status is ObservationStatus.ACCEPTED
     assert proposal.moves == (first, second)
-    assert proposal.evidence.feature_version == "two-ply-template-v2"
+    assert proposal.evidence.feature_version == "two-ply-template-v3"
     assert all(
         candidate.moves[0] == first for candidate in proposal.evidence.candidates
     )
+
+
+def test_two_ply_observer_only_expands_first_moves_from_changed_sources() -> None:
+    board = parse_fen(START)
+    first = _move(board, "h2e2")
+    middle = apply_move(board, first)
+    second = _move(middle, "h7e7")
+    final = apply_move(middle, second)
+    committer = Mock(wraps=RuleStateCommitter())
+
+    proposal = LegalTwoPlyDiffObserver(
+        patch_size=CELL,
+        committer=committer,
+    ).observe(
+        board,
+        _render(board),
+        _render(final),
+        _geometry(),
+    )
+
+    assert proposal.status is ObservationStatus.ACCEPTED
+    committer.project_two_ply.assert_not_called()
+    expanded_first_moves = tuple(
+        call.args[1] for call in committer.project_replies.call_args_list
+    )
+    assert expanded_first_moves
+    assert {move.from_index for move in expanded_first_moves} == {first.from_index}
 
 
 def test_two_ply_observer_reports_no_change_for_the_confirmed_frame() -> None:
