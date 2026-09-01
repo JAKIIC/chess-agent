@@ -228,7 +228,32 @@ def test_two_ply_observer_tolerates_weak_highlight_artifacts_that_keep_semantics
 
     assert proposal.status is ObservationStatus.ACCEPTED
     assert proposal.moves == (first, second)
-    assert proposal.evidence.candidates[0].unexpected_difference == 6.0
+    # Semantically verified highlight spill is not an unrelated board change.
+    assert proposal.evidence.candidates[0].unexpected_difference == 0.0
+
+
+def test_two_ply_observer_ignores_disappearing_prior_highlights_that_keep_semantics() -> None:
+    board = parse_fen(START)
+    first = _move(board, "h2e2")
+    middle = apply_move(board, first)
+    second = _move(middle, "h7e7")
+    final = apply_move(middle, second)
+    before = _render(board)
+    # The confirmed baseline can still contain the previous move's tint.  Both
+    # affected intersections remain occupied by the same red/black piece class
+    # after the next two plies, so their visual reset is not a board change.
+    _paint_cell(before, 81, PALETTE["K"])
+    _paint_cell(before, 8, PALETTE["k"])
+
+    proposal = LegalTwoPlyDiffObserver(patch_size=CELL).observe(
+        board,
+        before,
+        _render(final),
+        _geometry(),
+    )
+
+    assert proposal.status is ObservationStatus.ACCEPTED
+    assert proposal.moves == (first, second)
 
 
 def test_two_ply_observer_rejects_a_weak_outside_semantic_change() -> None:

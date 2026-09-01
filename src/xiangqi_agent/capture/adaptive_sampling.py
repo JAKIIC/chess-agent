@@ -7,6 +7,7 @@ from xiangqi_agent.capture.protocol import CaptureFrame
 _NANOSECONDS_PER_SECOND = 1_000_000_000
 _NANOSECONDS_PER_MILLISECOND = 1_000_000
 _VISUAL_TRIGGER_THRESHOLD = 12
+_VISUAL_SETTLE_THRESHOLD = 3
 _VISUAL_TRIGGER_STRIDE = 8
 
 
@@ -25,7 +26,7 @@ class AdaptiveBurstSampler:
         self,
         *,
         steady_fps: int = 2,
-        settle_ms: int = 100,
+        settle_ms: int = 400,
         stable_repeats: int = 2,
     ) -> None:
         self._steady_fps = _positive_integer("steady_fps", steady_fps)
@@ -39,6 +40,7 @@ class AdaptiveBurstSampler:
         self._settled_latest = False
         self._latest_emitted = False
         self._last_emitted: CaptureFrame | None = None
+        self._last_visual_change_ns: int | None = None
 
     @property
     def bursting(self) -> bool:
@@ -51,13 +53,19 @@ class AdaptiveBurstSampler:
         self._settled_latest = False
         self._latest_emitted = True
         self._last_emitted = frame
+        self._last_visual_change_ns = frame.timestamp_ns
 
     def set_bursting(self, active: bool) -> None:
         if active == self._bursting:
             return
         self._bursting = active
         self._settled_latest = False
-        if not active and self._latest is not None:
+        if self._latest is None:
+            return
+        if active:
+            self._last_visual_change_ns = self._latest.timestamp_ns
+        else:
+            self._latest_emitted = True
             self._next_steady_due_ns = self._latest.timestamp_ns + self._steady_interval_ns
 
     def on_frame(self, frame: CaptureFrame) -> tuple[CaptureFrame, ...]:
@@ -72,9 +80,21 @@ class AdaptiveBurstSampler:
         samples: tuple[CaptureFrame, ...] = ()
         quiet_gap = frame.timestamp_ns - latest.timestamp_ns >= self._settle_ns
         if self._bursting:
-            if quiet_gap and not self._settled_latest:
-                samples = (latest,) * self._stable_repeats
-            samples += (frame,)
+            if self._visual_change_exceeds(
+                latest,
+                frame,
+                threshold=_VISUAL_SETTLE_THRESHOLD,
+            ):
+                self._last_visual_change_ns = frame.timestamp_ns
+                self._settled_latest = False
+            quiet_since_ns = self._last_visual_change_ns
+            if (
+                not self._settled_latest
+                and quiet_since_ns is not None
+                and frame.timestamp_ns - quiet_since_ns >= self._settle_ns
+            ):
+                samples = (frame,) * (self._stable_repeats + 1)
+                self._settled_latest = True
         elif quiet_gap and not self._latest_emitted:
             samples = (latest,) * (self._stable_repeats + 1) + (frame,)
         elif self._visual_change_exceeds_trigger(frame):
@@ -84,7 +104,8 @@ class AdaptiveBurstSampler:
         if samples:
             self._next_steady_due_ns = frame.timestamp_ns + self._steady_interval_ns
             self._last_emitted = samples[-1]
-        self._settled_latest = False
+        if not self._bursting:
+            self._settled_latest = False
         self._latest_emitted = bool(samples)
         return samples
 
@@ -94,14 +115,16 @@ class AdaptiveBurstSampler:
             raise ValueError("clock timestamp must not precede the latest capture frame")
 
         if self._bursting:
+            quiet_since_ns = self._last_visual_change_ns
             if (
                 not self._settled_latest
-                and timestamp_ns - latest.timestamp_ns >= self._settle_ns
+                and quiet_since_ns is not None
+                and timestamp_ns - quiet_since_ns >= self._settle_ns
             ):
                 self._settled_latest = True
                 self._latest_emitted = True
                 self._last_emitted = latest
-                return (latest,) * self._stable_repeats
+                return (latest,) * (self._stable_repeats + 1)
             return ()
 
         if not self._latest_emitted and timestamp_ns - latest.timestamp_ns >= self._settle_ns:
@@ -123,15 +146,31 @@ class AdaptiveBurstSampler:
         reference = self._last_emitted
         if reference is None:
             return False
+        return self._visual_change_exceeds(
+            reference,
+            frame,
+            threshold=_VISUAL_TRIGGER_THRESHOLD,
+        )
+
+    @staticmethod
+    def _visual_change_exceeds(
+        reference: CaptureFrame,
+        frame: CaptureFrame,
+        *,
+        threshold: int,
+    ) -> bool:
         before = reference.bgra[::_VISUAL_TRIGGER_STRIDE, ::_VISUAL_TRIGGER_STRIDE, :3]
         after = frame.bgra[::_VISUAL_TRIGGER_STRIDE, ::_VISUAL_TRIGGER_STRIDE, :3]
         difference = np.abs(before.astype(np.int16) - after.astype(np.int16))
-        return bool(difference.max(initial=0) >= _VISUAL_TRIGGER_THRESHOLD)
+        return bool(difference.max(initial=0) >= threshold)
 
     def next_due_ns(self) -> int | None:
         latest = self._require_latest()
         if self._bursting:
-            return None if self._settled_latest else latest.timestamp_ns + self._settle_ns
+            quiet_since_ns = self._last_visual_change_ns
+            if self._settled_latest or quiet_since_ns is None:
+                return None
+            return quiet_since_ns + self._settle_ns
         due = self._next_steady_due_ns
         if not self._latest_emitted:
             settle_due = latest.timestamp_ns + self._settle_ns

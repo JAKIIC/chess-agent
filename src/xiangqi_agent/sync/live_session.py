@@ -147,7 +147,7 @@ class LiveSyncSession:
         on_update: Callable[[LiveSyncUpdate], None] | None = None,
         sync_mode: SyncMode = SyncMode.STRICT_SINGLE,
         steady_fps: int = 2,
-        settle_ms: int = 100,
+        settle_ms: int = 400,
         stable_pairs: int = 2,
         patch_size: int = 48,
         capture_transition_evidence: bool = False,

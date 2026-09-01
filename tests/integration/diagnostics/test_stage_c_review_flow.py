@@ -40,7 +40,7 @@ from xiangqi_agent.vision.geometry import BoardGeometry, parse_normalized_quad
 from xiangqi_agent.vision.occupancy import OccupancyEvidence
 
 START_FEN = "rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w"
-RECAPTURE_FEN = "r3k4/9/9/9/r3p4/9/9/9/9/R3K4 w"
+RECAPTURE_FEN = "r3k4/9/9/9/r3p4/9/8P/9/9/R3K4 w"
 CELL = 24
 FRAME_SIZE = (216, 240)
 QUAD = parse_normalized_quad(
@@ -124,7 +124,7 @@ def test_rejected_visual_candidate_can_be_corrected_and_replays_as_missed_valid(
         event_id="corrected-event",
         expected_status=LiveSyncStatus.PAUSED_AMBIGUOUS,
         review_outcome=StageCReviewOutcome.LEGAL_MOVE_CORRECTION,
-        unrelated_point=40,
+        unrelated_point=62,
     )
 
     assert flow.update.moves == ()
@@ -185,11 +185,16 @@ def _promote_flow(
     frame = _render(visual_final)
     if unrelated_point is not None:
         row, column = divmod(unrelated_point, 9)
+        symbol = board.pieces[unrelated_point]
+        # Force an explicit side change at an unrelated intersection while
+        # keeping its raw difference below the four real move endpoints.  This
+        # preserves the bounded four-crop evidence contract used by promotion.
+        unrelated_symbol = "k" if symbol.isupper() else "P"
         frame[
             row * CELL : (row + 1) * CELL,
             column * CELL : (column + 1) * CELL,
             :3,
-        ] = 255
+        ] = PALETTE[unrelated_symbol]
     update = _capture_terminal_update(
         board,
         frame,

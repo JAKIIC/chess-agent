@@ -180,18 +180,38 @@ class LegalTwoPlyDiffObserver:
                 if index not in changed
                 and difference > self._gate.profile.max_unexpected_difference
             )
+            semantic_artifacts: set[int] = set()
             try:
                 # A bounded outside difference can only be treated as UI
                 # highlight/shadow when the final patch still matches the
                 # unchanged board symbol's occupancy/side semantics.
                 for index in artifact_points:
                     symbol = board.pieces[index]
-                    key = (index, symbol)
+                    expected_symbols = (
+                        frozenset({"."})
+                        if symbol == "."
+                        else frozenset(
+                            candidate
+                            for candidate in templates.symbols
+                            if candidate != "."
+                            and candidate.isupper() == symbol.isupper()
+                        )
+                    )
+                    key = (index, "".join(sorted(expected_symbols)))
                     match = match_cache.get(key)
                     if match is None:
-                        match = templates.match(symbol, after_patches[index])
+                        match = templates.match_any(
+                            expected_symbols,
+                            after_patches[index],
+                        )
                         match_cache[key] = match
                     matches.append(match)
+                    if (
+                        match.distance <= self._gate.profile.max_template_distance
+                        and match.confidence
+                        >= self._gate.profile.min_template_confidence
+                    ):
+                        semantic_artifacts.add(index)
             except ValueError:
                 template_unavailable = True
                 continue
@@ -199,7 +219,7 @@ class LegalTwoPlyDiffObserver:
                 (
                     difference
                     for index, difference in enumerate(local)
-                    if index not in changed
+                    if index not in changed and index not in semantic_artifacts
                 ),
                 default=0.0,
             )
