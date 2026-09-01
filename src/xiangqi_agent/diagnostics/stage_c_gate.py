@@ -29,6 +29,10 @@ from xiangqi_agent.sync.sequence_gate import (
     SequenceDecisionGate,
     SequenceThresholdProfile,
 )
+from xiangqi_agent.sync.two_ply_profile import (
+    TWO_PLY_FEATURE_VERSION,
+    TWO_PLY_MINIMUM_SEMANTIC_CONFIDENCE,
+)
 
 _MIN_VALID_SAMPLES = 30
 _MIN_DISTINCT_VALID_SESSIONS = 30
@@ -46,7 +50,7 @@ _REQUIRED_REJECTION_SCENARIOS = (
     StageCScenario.THREE_PLY,
 )
 
-DEFAULT_STAGE_C_FEATURE_VERSION = "two-ply-template-transfer-v5"
+DEFAULT_STAGE_C_FEATURE_VERSION = TWO_PLY_FEATURE_VERSION
 DEFAULT_STAGE_C_THRESHOLD_PROFILE = SequenceThresholdProfile(
     min_local_difference=5.0,
     max_unexpected_difference=3.0,
@@ -54,7 +58,7 @@ DEFAULT_STAGE_C_THRESHOLD_PROFILE = SequenceThresholdProfile(
     min_margin=5.0,
     max_template_distance=0.18,
     min_template_margin=0.02,
-    min_template_confidence=0.8,
+    min_template_confidence=TWO_PLY_MINIMUM_SEMANTIC_CONFIDENCE,
     profile_version="human-ai-two-ply-v2",
 )
 

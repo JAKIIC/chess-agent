@@ -23,7 +23,11 @@ from xiangqi_agent.vision.endpoint_features import (
     InstanceTransferExtractor,
 )
 from xiangqi_agent.vision.geometry import BoardGeometry
-from xiangqi_agent.vision.templates import PieceTemplateBank
+from xiangqi_agent.vision.templates import (
+    PieceTemplateBank,
+    PieceTemplateBankCache,
+    TemplateClassification,
+)
 
 
 class MoveObserver(Protocol):
@@ -53,6 +57,7 @@ class LegalMoveDiffObserver:
         max_instance_distance: float = 0.35,
         min_instance_evidence_score: float = 0.4,
         feature_extractor: EndpointFeatureExtractor | None = None,
+        template_cache: PieceTemplateBankCache | None = None,
     ) -> None:
         if isinstance(patch_size, bool) or not isinstance(patch_size, int) or patch_size <= 0:
             raise ValueError("patch_size must be a positive integer")
@@ -85,6 +90,12 @@ class LegalMoveDiffObserver:
         self._max_semantic_distance = max_semantic_distance
         self._min_semantic_margin = min_semantic_margin
         self._feature_extractor = feature_extractor or InstanceTransferExtractor()
+        if template_cache is not None and not isinstance(
+            template_cache,
+            PieceTemplateBankCache,
+        ):
+            raise TypeError("template_cache must be a PieceTemplateBankCache")
+        self._template_cache = template_cache or PieceTemplateBankCache()
         self._semantic_gate = MoveSemanticGate(
             SemanticThresholds(
                 max_source_empty_distance=max_semantic_distance,
@@ -115,17 +126,19 @@ class LegalMoveDiffObserver:
                 evidence=MoveEvidence((), local, ()),
             )
 
-        templates = PieceTemplateBank.from_position(
+        templates = self._template_cache.get(
             board,
             geometry,
             before,
             patch_size=self._patch_size,
         )
+        classification_cache: dict[int, TemplateClassification] = {}
         semantically_unchanged = _semantic_unchanged_mask(
             board,
             local,
             after_patches,
             templates,
+            classification_cache,
             min_visual_difference=self._max_unexpected_difference,
             max_semantic_distance=self._max_semantic_distance,
             min_semantic_margin=self._min_semantic_margin,
@@ -143,6 +156,7 @@ class LegalMoveDiffObserver:
                         after_patches,
                         templates,
                         semantically_unchanged,
+                        classification_cache,
                     )
                     for move in legal_moves(board)
                 ),
@@ -223,6 +237,7 @@ def _score_candidate(
     after_patches: tuple[NDArray[np.uint8], ...],
     templates: PieceTemplateBank,
     semantically_unchanged: tuple[bool, ...],
+    classification_cache: dict[int, TemplateClassification],
 ) -> CandidateEvidence:
     source = local[move.from_index]
     destination = local[move.to_index]
@@ -235,17 +250,24 @@ def _score_candidate(
         ),
         default=0.0,
     )
-    source_match = templates.match_any(frozenset({"."}), after_patches[move.from_index])
+    source_match = _classification_for(
+        move.from_index,
+        after_patches,
+        templates,
+        classification_cache,
+    ).match_any(frozenset({"."}))
     moving_symbol = board.pieces[move.from_index]
     same_side_symbols = frozenset(
         symbol
         for symbol in templates.symbols
         if symbol != "." and symbol.isupper() == moving_symbol.isupper()
     )
-    destination_match = templates.match_any(
-        same_side_symbols,
-        after_patches[move.to_index],
-    )
+    destination_match = _classification_for(
+        move.to_index,
+        after_patches,
+        templates,
+        classification_cache,
+    ).match_any(same_side_symbols)
     return CandidateEvidence(
         move=move,
         source_difference=source,
@@ -265,6 +287,7 @@ def _semantic_unchanged_mask(
     local: tuple[float, ...],
     after_patches: tuple[NDArray[np.uint8], ...],
     templates: PieceTemplateBank,
+    classification_cache: dict[int, TemplateClassification],
     *,
     min_visual_difference: float,
     max_semantic_distance: float,
@@ -286,13 +309,31 @@ def _semantic_unchanged_mask(
                 if symbol != "." and symbol.isupper() == expected_symbol.isupper()
             )
         )
-        match = templates.match_any(expected_symbols, patch)
+        match = _classification_for(
+            index,
+            after_patches,
+            templates,
+            classification_cache,
+        ).match_any(expected_symbols)
         unchanged.append(
             match.distance <= max_semantic_distance
             and match.margin >= min_semantic_margin
             and match.confidence >= min_semantic_evidence_score
         )
     return tuple(unchanged)
+
+
+def _classification_for(
+    index: int,
+    patches: tuple[NDArray[np.uint8], ...],
+    templates: PieceTemplateBank,
+    cache: dict[int, TemplateClassification],
+) -> TemplateClassification:
+    classification = cache.get(index)
+    if classification is None:
+        classification = templates.classify(patches[index])
+        cache[index] = classification
+    return classification
 
 
 def _ambiguous(

@@ -3,14 +3,17 @@ from unittest.mock import Mock
 
 import cv2
 import numpy as np
+import pytest
 
 from xiangqi_agent.domain.board import BoardState, Move
 from xiangqi_agent.domain.fen import parse_fen
 from xiangqi_agent.domain.rules import apply_move, legal_moves
 from xiangqi_agent.sync.committer import RuleStateCommitter
 from xiangqi_agent.sync.evidence import ObservationStatus
+from xiangqi_agent.sync.move_observer import LegalMoveDiffObserver
 from xiangqi_agent.sync.sequence_observer import LegalTwoPlyDiffObserver
 from xiangqi_agent.vision.geometry import BoardGeometry, NormalizedQuad
+from xiangqi_agent.vision.templates import PieceTemplateBank, PieceTemplateBankCache
 
 START = "rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w"
 CELL = 24
@@ -128,6 +131,81 @@ def test_two_ply_observer_only_expands_first_moves_from_changed_sources() -> Non
     )
     assert expanded_first_moves
     assert {move.from_index for move in expanded_first_moves} == {first.from_index}
+
+
+def test_two_ply_observer_classifies_each_after_patch_at_most_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    board = parse_fen(START)
+    first = _move(board, "h2e2")
+    middle = apply_move(board, first)
+    second = _move(middle, "h7e7")
+    final = apply_move(middle, second)
+    real_classify = PieceTemplateBank.classify
+    calls_by_patch: dict[int, int] = {}
+
+    def counted_classify(self: PieceTemplateBank, patch: np.ndarray):
+        key = id(patch)
+        calls_by_patch[key] = calls_by_patch.get(key, 0) + 1
+        return real_classify(self, patch)
+
+    monkeypatch.setattr(PieceTemplateBank, "classify", counted_classify)
+
+    proposal = LegalTwoPlyDiffObserver(patch_size=CELL).observe(
+        board,
+        _render(board),
+        _render(final),
+        _geometry(),
+    )
+
+    assert proposal.status is ObservationStatus.ACCEPTED
+    assert calls_by_patch
+    assert max(calls_by_patch.values()) == 1
+
+
+def test_single_and_two_ply_observers_share_one_confirmed_template_bank(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    board = parse_fen(START)
+    first = _move(board, "h2e2")
+    middle = apply_move(board, first)
+    second = _move(middle, "h7e7")
+    final = apply_move(middle, second)
+    before = _render(board)
+    cache = PieceTemplateBankCache()
+    real_from_position = PieceTemplateBank.from_position.__func__
+    calls = 0
+
+    def counted_from_position(cls, *args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return real_from_position(cls, *args, **kwargs)
+
+    monkeypatch.setattr(
+        PieceTemplateBank,
+        "from_position",
+        classmethod(counted_from_position),
+    )
+    single = LegalMoveDiffObserver(patch_size=CELL, template_cache=cache)
+    sequence = LegalTwoPlyDiffObserver(patch_size=CELL, template_cache=cache)
+
+    first_proposal = single.observe(
+        board,
+        before,
+        _render(middle),
+        _geometry(),
+    )
+    sequence_proposal = sequence.observe_after_first(
+        board,
+        first,
+        before,
+        _render(final),
+        _geometry(),
+    )
+
+    assert first_proposal.status is ObservationStatus.ACCEPTED
+    assert sequence_proposal.status is ObservationStatus.ACCEPTED
+    assert calls == 1
 
 
 def test_two_ply_observer_reports_no_change_for_the_confirmed_frame() -> None:

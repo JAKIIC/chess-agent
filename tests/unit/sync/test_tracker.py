@@ -254,6 +254,161 @@ def test_enabled_transition_capture_attaches_before_and_after_occupancy() -> Non
     assert observer.remaining == 0
 
 
+def test_tracker_caches_confirmed_occupancy_and_incrementally_updates_accepted_move() -> None:
+    board = parse_fen(START)
+    first = _move(board, "h2e2")
+    middle = apply_move(board, first)
+    second = _move(middle, "h7e7")
+    final = apply_move(middle, second)
+    observer = _IncrementalSequenceOccupancyObserver(
+        _occupancy_for(board),
+        _occupancy_for(final),
+    )
+    tracker = _tracker(
+        board,
+        mode=SyncMode.HUMAN_VS_AI,
+        sequence_observer=LegalTwoPlyDiffObserver(patch_size=CELL),
+        capture_transition_evidence=True,
+        occupancy_observer=observer,
+    )
+
+    tracker.initialize(_render(board))
+    result = _settle(tracker, _render(final))
+
+    assert result.status is TrackingStatus.ACCEPTED
+    assert result.transition_evidence is not None
+    assert result.transition_evidence.before_occupancy == _occupancy_for(board)
+    assert result.transition_evidence.after_occupancy == _occupancy_for(final)
+    assert observer.full_calls == 1
+    assert observer.changed_calls == [(22, 25, 67, 70)]
+
+
+def test_tracker_updates_single_move_occupancy_from_verified_endpoints() -> None:
+    board = parse_fen(START)
+    move = _move(board, "h2e2")
+    after = apply_move(board, move)
+    differences = [0.0] * 90
+    for index, value in enumerate((100.0, 90.0, 80.0, 70.0, 60.0)):
+        differences[index] = value
+    differences[move.from_index] = 12.0
+    differences[move.to_index] = 11.0
+
+    class ArtifactHeavyAcceptedObserver:
+        def observe(self, *_args: object) -> MoveProposal:
+            return MoveProposal(
+                status=ObservationStatus.ACCEPTED,
+                move=move,
+                evidence_score=1.0,
+                evidence=MoveEvidence((), tuple(differences), ()),
+            )
+
+    occupancy = _IncrementalSequenceOccupancyObserver(
+        _occupancy_for(board),
+        _occupancy_for(after),
+    )
+    tracker = StableMoveTracker(
+        board,
+        _geometry(),
+        ArtifactHeavyAcceptedObserver(),
+        required_stable_pairs=2,
+        patch_size=CELL,
+        capture_transition_evidence=True,
+        occupancy_observer=occupancy,
+    )
+    tracker.initialize(_render(board))
+
+    result = _settle(tracker, _render(after))
+
+    expected = tuple(sorted((move.from_index, move.to_index)))
+    assert result.status is TrackingStatus.ACCEPTED
+    assert result.transition_evidence is not None
+    assert result.transition_evidence.changed_points == expected
+    assert occupancy.changed_calls == [expected]
+
+
+def test_tracker_updates_two_ply_occupancy_from_verified_candidate_points() -> None:
+    board = parse_fen(START)
+    first = _move(board, "h2e2")
+    middle = apply_move(board, first)
+    second = _move(middle, "h7e7")
+    final = apply_move(middle, second)
+    changed_points = tuple(
+        index
+        for index, (before, after) in enumerate(
+            zip(board.pieces, final.pieces, strict=True)
+        )
+        if before != after
+    )
+    differences = [0.0] * 90
+    for index, value in enumerate((100.0, 90.0, 80.0, 70.0, 60.0)):
+        differences[index] = value
+    for index, value in zip(changed_points, (12.0, 11.0, 10.0, 9.0), strict=True):
+        differences[index] = value
+    candidate = SequenceCandidateEvidence(
+        moves=(first, second),
+        changed_points=changed_points,
+        expected_change_floor=9.0,
+        unexpected_difference=100.0,
+        maximum_template_distance=0.0,
+        minimum_template_margin=1.0,
+        minimum_template_confidence=1.0,
+        score=1.0,
+        final_position_id=final.position_id,
+    )
+
+    class ArtifactHeavySingleObserver:
+        def observe(self, *_args: object) -> MoveProposal:
+            return MoveProposal(
+                status=ObservationStatus.AMBIGUOUS,
+                move=None,
+                evidence_score=0.0,
+                evidence=MoveEvidence(
+                    (),
+                    tuple(differences),
+                    ("outside_change",),
+                ),
+            )
+
+    class AcceptedSequenceObserver:
+        def observe(self, *_args: object) -> MoveSequenceProposal:
+            return MoveSequenceProposal(
+                status=ObservationStatus.ACCEPTED,
+                moves=(first, second),
+                evidence_score=1.0,
+                evidence=MoveSequenceEvidence(
+                    (candidate,),
+                    tuple(differences),
+                    (),
+                    "test-v1",
+                ),
+            )
+
+    occupancy = _IncrementalSequenceOccupancyObserver(
+        _occupancy_for(board),
+        _occupancy_for(final),
+    )
+    tracker = StableMoveTracker(
+        board,
+        _geometry(),
+        ArtifactHeavySingleObserver(),
+        mode=SyncMode.HUMAN_VS_AI,
+        sequence_observer=AcceptedSequenceObserver(),
+        required_stable_pairs=2,
+        patch_size=CELL,
+        capture_transition_evidence=True,
+        occupancy_observer=occupancy,
+    )
+    tracker.initialize(_render(board))
+
+    result = _settle(tracker, _render(final))
+
+    assert result.status is TrackingStatus.ACCEPTED
+    assert result.moves == (first, second)
+    assert result.transition_evidence is not None
+    assert result.transition_evidence.changed_points == changed_points
+    assert occupancy.changed_calls == [changed_points]
+
+
 def test_transition_latency_uses_the_final_capture_timestamp_when_clocks_match(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -888,3 +1043,36 @@ class _SequenceOccupancyObserver:
         if not self._values:
             raise AssertionError("occupancy observer received an unexpected call")
         return self._values.pop(0)
+
+
+class _IncrementalSequenceOccupancyObserver:
+    def __init__(
+        self,
+        baseline: OccupancyEvidence,
+        after: OccupancyEvidence,
+    ) -> None:
+        self._baseline = baseline
+        self._after = after
+        self.full_calls = 0
+        self.changed_calls: list[tuple[int, ...]] = []
+
+    def observe(
+        self,
+        _frame: np.ndarray,
+        _geometry: BoardGeometry,
+    ) -> OccupancyEvidence:
+        self.full_calls += 1
+        if self.full_calls > 1:
+            raise AssertionError("accepted move must reuse cached baseline occupancy")
+        return self._baseline
+
+    def observe_changed(
+        self,
+        _frame: np.ndarray,
+        _geometry: BoardGeometry,
+        baseline: OccupancyEvidence,
+        point_indices: tuple[int, ...],
+    ) -> OccupancyEvidence:
+        assert baseline == self._baseline
+        self.changed_calls.append(point_indices)
+        return self._after

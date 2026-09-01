@@ -4,11 +4,17 @@ from dataclasses import replace
 
 from xiangqi_agent.diagnostics.stage_c_gate import (
     DEFAULT_STAGE_C_FEATURE_VERSION,
+    DEFAULT_STAGE_C_THRESHOLD_PROFILE,
     evaluate_stage_c_results,
 )
 from xiangqi_agent.diagnostics.stage_c_replay import HumanAiStageCReplayResult
 from xiangqi_agent.diagnostics.stage_c_review import StageCReviewOutcome
 from xiangqi_agent.diagnostics.stage_c_samples import StageCExpectedOutcome, StageCScenario
+from xiangqi_agent.sync.two_ply_profile import (
+    TWO_PLY_FEATURE_VERSION,
+    TWO_PLY_INSTANCE_TRANSFER_MAX_SHIFT,
+    TWO_PLY_MINIMUM_SEMANTIC_CONFIDENCE,
+)
 
 REJECTION_SCENARIOS = (
     StageCScenario.MULTIPLE_CANDIDATES,
@@ -95,7 +101,14 @@ def _report(
 
 
 def test_release_gate_targets_the_current_two_ply_feature_version() -> None:
-    assert DEFAULT_STAGE_C_FEATURE_VERSION == "two-ply-template-transfer-v5"
+    assert DEFAULT_STAGE_C_FEATURE_VERSION == TWO_PLY_FEATURE_VERSION
+    assert TWO_PLY_FEATURE_VERSION == "two-ply-template-transfer-v5"
+    assert (
+        DEFAULT_STAGE_C_THRESHOLD_PROFILE.min_template_confidence
+        == TWO_PLY_MINIMUM_SEMANTIC_CONFIDENCE
+        == 0.8
+    )
+    assert TWO_PLY_INSTANCE_TRANSFER_MAX_SHIFT == 1
 
 
 def test_29_valid_events_fail_the_count_gate() -> None:

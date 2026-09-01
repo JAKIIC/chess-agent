@@ -35,11 +35,14 @@ from xiangqi_agent.diagnostics.stage_c_samples import (
 from xiangqi_agent.domain.board import BoardState, Move
 from xiangqi_agent.domain.fen import parse_fen
 from xiangqi_agent.domain.rules import apply_move, legal_moves
+from xiangqi_agent.sync.two_ply_profile import (
+    TWO_PLY_FEATURE_VERSION,
+    TWO_PLY_INSTANCE_TRANSFER_MAX_SHIFT,
+    TWO_PLY_MINIMUM_SEMANTIC_CONFIDENCE,
+)
 from xiangqi_agent.vision.endpoint_features import InstanceTransferExtractor
 
 _MINIMUM_OCCUPANCY_CONFIDENCE = 0.65
-_MINIMUM_PIECE_TRANSFER_CONFIDENCE = 0.8
-_PIECE_TRANSFER_FEATURE_VERSION = "two-ply-template-transfer-v5"
 _MACHINE_TERMINAL_REASONS = frozenset(
     {
         "frame_size_changed",
@@ -484,7 +487,7 @@ def _piece_transfer_verifies_changed_points(
 ) -> bool:
     metadata = event.metadata
     if (
-        metadata.feature_version != _PIECE_TRANSFER_FEATURE_VERSION
+        metadata.feature_version != TWO_PLY_FEATURE_VERSION
         or metadata.observed_status is not StageCObservedStatus.ACCEPTED
         or metadata.observed_moves_uci != moves_uci
         or len(moves_uci) != 2
@@ -504,7 +507,7 @@ def _piece_transfer_verifies_changed_points(
     if (
         candidate is None
         or candidate.minimum_template_confidence
-        < _MINIMUM_PIECE_TRANSFER_CONFIDENCE
+        < TWO_PLY_MINIMUM_SEMANTIC_CONFIDENCE
     ):
         return False
     moves = _projected_moves(before, moves_uci)
@@ -513,7 +516,9 @@ def _piece_transfer_verifies_changed_points(
     first, second = moves
     surviving_moves = (first, second) if second.to_index != first.to_index else (second,)
     crops = {crop.point_index: crop for crop in event.crops}
-    extractor = InstanceTransferExtractor()
+    extractor = InstanceTransferExtractor(
+        max_shift=TWO_PLY_INSTANCE_TRANSFER_MAX_SHIFT
+    )
     for move in surviving_moves:
         source = crops.get(move.from_index)
         target = crops.get(move.to_index)
@@ -527,7 +532,7 @@ def _piece_transfer_verifies_changed_points(
                 target_after=target.after,
             )
         ).instance_evidence_score
-        if score < _MINIMUM_PIECE_TRANSFER_CONFIDENCE:
+        if score < TWO_PLY_MINIMUM_SEMANTIC_CONFIDENCE:
             return False
     return True
 

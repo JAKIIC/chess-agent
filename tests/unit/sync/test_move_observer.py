@@ -7,6 +7,7 @@ from xiangqi_agent.domain.rules import apply_move, legal_moves
 from xiangqi_agent.sync.move_observer import LegalMoveDiffObserver, ObservationStatus
 from xiangqi_agent.vision.endpoint_features import EndpointFeatures
 from xiangqi_agent.vision.geometry import BoardGeometry, NormalizedQuad
+from xiangqi_agent.vision.templates import PieceTemplateBank
 
 START = "rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w"
 CELL = 24
@@ -56,6 +57,33 @@ def test_observer_accepts_the_unique_legal_origin_and_destination_pair() -> None
     assert result.evidence.candidates[0].move.uci == "h2e2"
     assert result.evidence.endpoint_features is not None
     assert result.evidence.endpoint_features.feature_version == "instance-transfer-v1"
+
+
+def test_observer_classifies_each_after_patch_at_most_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    board = parse_fen(START)
+    move = _move(board, "h2e2")
+    real_classify = PieceTemplateBank.classify
+    calls_by_patch: dict[int, int] = {}
+
+    def counted_classify(self: PieceTemplateBank, patch: np.ndarray):
+        key = id(patch)
+        calls_by_patch[key] = calls_by_patch.get(key, 0) + 1
+        return real_classify(self, patch)
+
+    monkeypatch.setattr(PieceTemplateBank, "classify", counted_classify)
+
+    result = LegalMoveDiffObserver(patch_size=CELL).observe(
+        board,
+        _render(board),
+        _render(apply_move(board, move)),
+        _geometry(),
+    )
+
+    assert result.status is ObservationStatus.ACCEPTED
+    assert calls_by_patch
+    assert max(calls_by_patch.values()) == 1
 
 
 def test_observer_does_not_accept_only_one_changed_intersection() -> None:

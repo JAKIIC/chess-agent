@@ -7,7 +7,11 @@ import numpy as np
 from numpy.typing import NDArray
 
 from xiangqi_agent.vision.geometry import BoardGeometry
-from xiangqi_agent.vision.occupancy import OccupancyEvidence, OccupancyObserver
+from xiangqi_agent.vision.occupancy import (
+    IncrementalOccupancyObserver,
+    OccupancyEvidence,
+    OccupancyObserver,
+)
 
 _CROP_SIZE = 48
 
@@ -93,14 +97,29 @@ def build_transition_capture_evidence(
     *,
     decision_latency_ms: float,
     occupancy_observer: OccupancyObserver | None = None,
+    confirmed_occupancy: OccupancyEvidence | None = None,
+    update_changed_occupancy_only: bool = False,
+    accepted_changed_points: tuple[int, ...] | None = None,
 ) -> TransitionCaptureEvidence:
+    if confirmed_occupancy is not None and not isinstance(
+        confirmed_occupancy,
+        OccupancyEvidence,
+    ):
+        raise TypeError("confirmed_occupancy must be OccupancyEvidence")
+    if not isinstance(update_changed_occupancy_only, bool):
+        raise TypeError("update_changed_occupancy_only must be a boolean")
+    if update_changed_occupancy_only and accepted_changed_points is None:
+        raise ValueError(
+            "incremental occupancy update requires accepted semantic changed points"
+        )
+    if confirmed_occupancy is not None and occupancy_observer is None:
+        raise ValueError("confirmed occupancy requires an occupancy observer")
     differences = _validated_differences(local_differences)
-    positive = tuple(index for index, value in enumerate(differences) if value > 0)
-    ranked = sorted(
-        positive or tuple(range(90)),
-        key=lambda index: (-differences[index], index),
+    selected = (
+        _validated_changed_points(accepted_changed_points)
+        if accepted_changed_points is not None
+        else _top_changed_points(differences)
     )
-    selected = tuple(sorted(ranked[:4]))
     before_patches = geometry.crop_selected_intersections(
         before,
         selected,
@@ -124,16 +143,25 @@ def build_transition_capture_evidence(
             strict=True,
         )
     )
-    before_occupancy = (
-        occupancy_observer.observe(before, geometry)
-        if occupancy_observer is not None
-        else None
-    )
-    after_occupancy = (
-        occupancy_observer.observe(after, geometry)
-        if occupancy_observer is not None
-        else None
-    )
+    before_occupancy = confirmed_occupancy
+    after_occupancy: OccupancyEvidence | None = None
+    if occupancy_observer is not None:
+        if before_occupancy is None:
+            before_occupancy = occupancy_observer.observe(before, geometry)
+        if update_changed_occupancy_only and isinstance(
+            occupancy_observer,
+            IncrementalOccupancyObserver,
+        ):
+            after_occupancy = occupancy_observer.observe_changed(
+                after,
+                geometry,
+                before_occupancy,
+                selected,
+            )
+        else:
+            after_occupancy = occupancy_observer.observe(after, geometry)
+        if before_occupancy.algorithm_version != after_occupancy.algorithm_version:
+            raise ValueError("occupancy algorithm changed during transition")
     return TransitionCaptureEvidence(
         changed_points=selected,
         local_differences=differences,
@@ -142,6 +170,33 @@ def build_transition_capture_evidence(
         before_occupancy=before_occupancy,
         after_occupancy=after_occupancy,
     )
+
+
+def _top_changed_points(differences: tuple[float, ...]) -> tuple[int, ...]:
+    positive = tuple(index for index, value in enumerate(differences) if value > 0)
+    ranked = sorted(
+        positive or tuple(range(90)),
+        key=lambda index: (-differences[index], index),
+    )
+    return tuple(sorted(ranked[:4]))
+
+
+def _validated_changed_points(values: tuple[int, ...]) -> tuple[int, ...]:
+    if (
+        not isinstance(values, tuple)
+        or not 1 <= len(values) <= 4
+        or tuple(sorted(set(values))) != values
+        or any(
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or not 0 <= value < 90
+            for value in values
+        )
+    ):
+        raise ValueError(
+            "accepted_changed_points must contain one through four stable board indices"
+        )
+    return values
 
 
 def _validated_differences(values: tuple[float, ...]) -> tuple[float, ...]:

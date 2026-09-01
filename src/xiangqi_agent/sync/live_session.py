@@ -30,6 +30,7 @@ from xiangqi_agent.sync.transition_capture import TransitionCaptureEvidence
 from xiangqi_agent.vision.change_detection import FrameStabilityDetector
 from xiangqi_agent.vision.geometry import BoardGeometry, NormalizedQuad
 from xiangqi_agent.vision.occupancy import OccupancyObserver, compare_occupancy
+from xiangqi_agent.vision.templates import PieceTemplateBankCache
 
 
 class LiveSyncStatus(StrEnum):
@@ -361,13 +362,20 @@ class LiveSyncSession:
                                 point_count=90,
                             )
                             continue
+                    template_cache = PieceTemplateBankCache()
                     tracker = StableMoveTracker(
                         self.board,
                         geometry,
-                        LegalMoveDiffObserver(patch_size=self._patch_size),
+                        LegalMoveDiffObserver(
+                            patch_size=self._patch_size,
+                            template_cache=template_cache,
+                        ),
                         mode=self._sync_mode,
                         sequence_observer=(
-                            LegalTwoPlyDiffObserver(patch_size=self._patch_size)
+                            LegalTwoPlyDiffObserver(
+                                patch_size=self._patch_size,
+                                template_cache=template_cache,
+                            )
                             if self._sync_mode is SyncMode.HUMAN_VS_AI
                             else None
                         ),

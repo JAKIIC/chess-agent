@@ -2,9 +2,14 @@ import cv2
 import numpy as np
 import pytest
 
+import xiangqi_agent.vision.templates as template_module
 from xiangqi_agent.domain.fen import parse_fen
 from xiangqi_agent.vision.geometry import BoardGeometry, NormalizedQuad
-from xiangqi_agent.vision.templates import PieceTemplateBank, TemplateExtractionError
+from xiangqi_agent.vision.templates import (
+    PieceTemplateBank,
+    PieceTemplateBankCache,
+    TemplateExtractionError,
+)
 
 START = "rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w"
 CELL = 24
@@ -121,6 +126,99 @@ def test_template_group_match_accepts_any_piece_from_the_expected_side() -> None
     assert match.distance == pytest.approx(0.0)
     assert match.margin > 0.02
     assert match.confidence > 0.99
+
+
+def test_prepared_classification_reuses_one_feature_for_multiple_queries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    board = parse_fen(START)
+    frame = _render(board.pieces)
+    geometry = _geometry()
+    templates = PieceTemplateBank.from_position(
+        board,
+        geometry,
+        frame,
+        patch_size=CELL,
+    )
+    patch = geometry.crop_intersections(frame, size=CELL)[81]
+    expected_exact = templates.match("R", patch)
+    red_symbols = frozenset(symbol for symbol in templates.symbols if symbol.isupper())
+    expected_group = templates.match_any(red_symbols, patch)
+    real_feature = template_module._feature
+    calls = 0
+
+    def counted_feature(candidate: np.ndarray):
+        nonlocal calls
+        calls += 1
+        return real_feature(candidate)
+
+    monkeypatch.setattr(template_module, "_feature", counted_feature)
+
+    classification = templates.classify(patch)
+
+    assert classification.match("R") == expected_exact
+    assert classification.match_any(red_symbols) == expected_group
+    assert classification.distance("R") == pytest.approx(expected_exact.distance)
+    assert calls == 1
+
+
+def test_template_bank_cache_invalidates_every_key_component(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    board = parse_fen(START)
+    geometry = _geometry()
+    changed_board = parse_fen(
+        "rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/4C2C1/9/RNBAKABNR b"
+    )
+    changed_geometry = BoardGeometry.from_quad(
+        NormalizedQuad(((0.04, 0.05), (0.96, 0.05), (0.96, 0.95), (0.04, 0.95))),
+        (CELL * 9, CELL * 10),
+    )
+    frame = _render(board.pieces)
+    changed_frame = frame.copy()
+    real_from_position = PieceTemplateBank.from_position.__func__
+    calls = 0
+
+    def counted_from_position(cls, *args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return real_from_position(cls, *args, **kwargs)
+
+    monkeypatch.setattr(
+        PieceTemplateBank,
+        "from_position",
+        classmethod(counted_from_position),
+    )
+    cache = PieceTemplateBankCache()
+
+    first = cache.get(board, geometry, frame, patch_size=CELL)
+    repeated = cache.get(board, geometry, frame, patch_size=CELL)
+    changed_board_bank = cache.get(changed_board, geometry, frame, patch_size=CELL)
+    changed_geometry_bank = cache.get(
+        changed_board,
+        changed_geometry,
+        frame,
+        patch_size=CELL,
+    )
+    changed_patch_bank = cache.get(
+        changed_board,
+        changed_geometry,
+        frame,
+        patch_size=CELL - 2,
+    )
+    changed_frame_bank = cache.get(
+        changed_board,
+        changed_geometry,
+        changed_frame,
+        patch_size=CELL - 2,
+    )
+
+    assert repeated is first
+    assert changed_board_bank is not first
+    assert changed_geometry_bank is not changed_board_bank
+    assert changed_patch_bank is not changed_geometry_bank
+    assert changed_frame_bank is not changed_patch_bank
+    assert calls == 5
 
 
 @pytest.mark.parametrize("symbol", ["K", "k"])

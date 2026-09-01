@@ -180,6 +180,35 @@ def test_known_position_observer_calibrates_theme_then_tracks_changed_occupancy(
     assert moved_evidence.algorithm_version == "known-position-template-occupancy-v1"
 
 
+def test_known_position_observer_updates_only_selected_points_from_cached_evidence() -> None:
+    baseline, geometry = _render_board(
+        START_BOARD,
+        (900, 1000),
+        Orientation.RED_BOTTOM,
+    )
+    move = next(move for move in legal_moves(START_BOARD) if move.uci == "h2e2")
+    after = apply_move(START_BOARD, move)
+    moved, _ = _render_board(after, (900, 1000), Orientation.RED_BOTTOM)
+    observer = KnownPositionOccupancyObserver(START_BOARD)
+    baseline_evidence = observer.observe(baseline, geometry)
+
+    selected = observer.observe_changed(
+        moved,
+        geometry,
+        baseline_evidence,
+        tuple(sorted((move.from_index, move.to_index))),
+    )
+    full = observer.observe(moved, geometry)
+
+    assert selected.occupied == full.occupied
+    assert all(
+        selected.confidences[index] == baseline_evidence.confidences[index]
+        for index in range(90)
+        if index not in (move.from_index, move.to_index)
+    )
+    assert compare_occupancy(selected, after, minimum_confidence=0.65).accepted
+
+
 def test_known_position_observer_rejects_an_unseparated_uniform_baseline() -> None:
     _, geometry = _render_board(
         START_BOARD,

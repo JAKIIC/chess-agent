@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 from math import exp
+from types import MappingProxyType
 
 import numpy as np
 from numpy.typing import NDArray
@@ -23,6 +24,64 @@ class TemplateMatch:
     distance: float
     margin: float
     confidence: float
+
+
+@dataclass(frozen=True, slots=True)
+class TemplateClassification:
+    """Distances for one patch, prepared once and queried by semantic group."""
+
+    _distances: Mapping[str, float]
+
+    @property
+    def symbols(self) -> frozenset[str]:
+        return frozenset(self._distances)
+
+    def distance(self, symbol: str) -> float:
+        return self._distances[_validate_symbol(symbol, self._distances)]
+
+    def match(self, expected_symbol: str) -> TemplateMatch:
+        expected = _validate_symbol(expected_symbol, self._distances)
+        return self.match_any(frozenset({expected}))
+
+    def match_any(self, expected_symbols: frozenset[str]) -> TemplateMatch:
+        if not expected_symbols:
+            raise ValueError("expected template group must not be empty")
+        unknown = expected_symbols - self.symbols
+        if unknown:
+            raise ValueError("expected template group contains an unknown symbol")
+        expected_groups = {_semantic_group(symbol) for symbol in expected_symbols}
+        if len(expected_groups) != 1:
+            raise ValueError("expected templates must belong to one semantic group")
+        expected, expected_distance = min(
+            (
+                (symbol, self._distances[symbol])
+                for symbol in expected_symbols
+            ),
+            key=lambda item: (item[1], item[0]),
+        )
+        alternatives = tuple(
+            distance
+            for symbol, distance in self._distances.items()
+            if symbol not in expected_symbols
+        )
+        margin = min(alternatives) - expected_distance if alternatives else float("inf")
+        semantic_groups = {_semantic_group(symbol) for symbol in self._distances}
+        group_distances = {
+            group: min(
+                distance
+                for symbol, distance in self._distances.items()
+                if _semantic_group(symbol) == group
+            )
+            for group in semantic_groups
+        }
+        floor = min(group_distances.values())
+        group_weights = {
+            group: exp(-(distance - floor) / 0.008)
+            for group, distance in group_distances.items()
+        }
+        expected_group = expected_groups.pop()
+        confidence = group_weights[expected_group] / sum(group_weights.values())
+        return TemplateMatch(expected, expected_distance, margin, confidence)
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,9 +122,7 @@ class PieceTemplateBank:
         return len(self._examples[_validate_symbol(symbol, self._examples)])
 
     def distance(self, symbol: str, patch: NDArray[np.generic]) -> float:
-        examples = self._examples[_validate_symbol(symbol, self._examples)]
-        candidate = _feature(patch)
-        return _minimum_distance(examples, candidate)
+        return self.classify(patch).distance(symbol)
 
     def occupancy_distances(
         self,
@@ -74,66 +131,101 @@ class PieceTemplateBank:
         """Return the closest empty and occupied distances from one feature pass."""
         if "." not in self._examples:
             raise ValueError("template bank has no empty examples")
-        occupied_examples = tuple(
-            example
+        if not any(
+            symbol != "." and examples
             for symbol, examples in self._examples.items()
-            if symbol != "."
-            for example in examples
-        )
-        if not occupied_examples:
+        ):
             raise ValueError("template bank has no occupied examples")
-        candidate = _feature(patch)
+        classification = self.classify(patch)
         return (
-            _minimum_distance(self._examples["."], candidate),
-            _minimum_distance(occupied_examples, candidate),
+            classification.distance("."),
+            min(
+                classification.distance(symbol)
+                for symbol in self._examples
+                if symbol != "."
+            ),
         )
 
     def match(self, expected_symbol: str, patch: NDArray[np.generic]) -> TemplateMatch:
-        expected = _validate_symbol(expected_symbol, self._examples)
-        return self.match_any(frozenset({expected}), patch)
+        return self.classify(patch).match(expected_symbol)
 
     def match_any(
         self,
         expected_symbols: frozenset[str],
         patch: NDArray[np.generic],
     ) -> TemplateMatch:
-        if not expected_symbols:
-            raise ValueError("expected template group must not be empty")
-        unknown = expected_symbols - self.symbols
-        if unknown:
-            raise ValueError("expected template group contains an unknown symbol")
-        expected_groups = {_semantic_group(symbol) for symbol in expected_symbols}
-        if len(expected_groups) != 1:
-            raise ValueError("expected templates must belong to one semantic group")
+        return self.classify(patch).match_any(expected_symbols)
+
+    def classify(self, patch: NDArray[np.generic]) -> TemplateClassification:
+        """Prepare every symbol distance from a single patch feature extraction."""
         candidate = _feature(patch)
         distances = {
             symbol: _minimum_distance(examples, candidate)
             for symbol, examples in self._examples.items()
         }
-        expected, expected_distance = min(
-            ((symbol, distances[symbol]) for symbol in expected_symbols),
-            key=lambda item: (item[1], item[0]),
+        return TemplateClassification(MappingProxyType(distances))
+
+
+class PieceTemplateBankCache:
+    """Reuse one bank while callers share one immutable confirmed-frame object.
+
+    Frame identity is intentionally part of the cache key. Callers must replace,
+    rather than mutate, a confirmed frame when its pixels change.
+    """
+
+    def __init__(self) -> None:
+        self._entry: _TemplateBankCacheEntry | None = None
+
+    def get(
+        self,
+        board: BoardState,
+        geometry: BoardGeometry,
+        frame: NDArray[np.generic],
+        *,
+        patch_size: int,
+    ) -> PieceTemplateBank:
+        if not isinstance(board, BoardState):
+            raise TypeError("template cache board must be a BoardState")
+        if not isinstance(geometry, BoardGeometry):
+            raise TypeError("template cache geometry must be a BoardGeometry")
+        if (
+            isinstance(patch_size, bool)
+            or not isinstance(patch_size, int)
+            or patch_size <= 0
+        ):
+            raise ValueError("template cache patch_size must be a positive integer")
+        entry = self._entry
+        if (
+            entry is not None
+            and entry.board_position_id == board.position_id
+            and entry.geometry == geometry
+            and entry.frame is frame
+            and entry.patch_size == patch_size
+        ):
+            return entry.bank
+        bank = PieceTemplateBank.from_position(
+            board,
+            geometry,
+            frame,
+            patch_size=patch_size,
         )
-        alternatives = tuple(
-            distance for symbol, distance in distances.items() if symbol not in expected_symbols
+        self._entry = _TemplateBankCacheEntry(
+            bank=bank,
+            board_position_id=board.position_id,
+            geometry=geometry,
+            frame=frame,
+            patch_size=patch_size,
         )
-        margin = min(alternatives) - expected_distance if alternatives else float("inf")
-        group_distances = {
-            group: min(
-                distance
-                for symbol, distance in distances.items()
-                if _semantic_group(symbol) == group
-            )
-            for group in {_semantic_group(symbol) for symbol in distances}
-        }
-        floor = min(group_distances.values())
-        group_weights = {
-            group: exp(-(distance - floor) / 0.008)
-            for group, distance in group_distances.items()
-        }
-        expected_group = expected_groups.pop()
-        confidence = group_weights[expected_group] / sum(group_weights.values())
-        return TemplateMatch(expected, expected_distance, margin, confidence)
+        return bank
+
+
+@dataclass(frozen=True, slots=True)
+class _TemplateBankCacheEntry:
+    bank: PieceTemplateBank
+    board_position_id: str
+    geometry: BoardGeometry
+    frame: NDArray[np.generic]
+    patch_size: int
 
 
 def _validate_symbol(symbol: str, examples: Mapping[str, object]) -> str:

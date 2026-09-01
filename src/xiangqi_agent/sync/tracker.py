@@ -28,7 +28,11 @@ from xiangqi_agent.sync.transition_capture import (
 )
 from xiangqi_agent.vision.change_detection import analyze_frame_change
 from xiangqi_agent.vision.geometry import BoardGeometry, GeometryError
-from xiangqi_agent.vision.occupancy import OccupancyObserver
+from xiangqi_agent.vision.occupancy import (
+    IncrementalOccupancyObserver,
+    OccupancyEvidence,
+    OccupancyObserver,
+)
 from xiangqi_agent.vision.position_validation import validate_fixed_theme_position
 
 
@@ -111,6 +115,7 @@ class StableMoveTracker:
         self._stable_pairs = 0
         self._blocked_status: TrackingStatus | None = None
         self._pending_first_move: Move | None = None
+        self._confirmed_occupancy: OccupancyEvidence | None = None
 
     @property
     def board(self) -> BoardState:
@@ -128,6 +133,7 @@ class StableMoveTracker:
         self._stable_pairs = 0
         self._blocked_status = None
         self._pending_first_move = None
+        self._confirmed_occupancy = self._observe_confirmed_occupancy(current)
         return TrackingUpdate(TrackingStatus.WATCHING, self._board)
 
     def push(
@@ -230,7 +236,12 @@ class StableMoveTracker:
                     current,
                     decision_started_ns,
                     capture_timestamp_ns,
+                    update_changed_occupancy_only=True,
+                    accepted_changed_points=tuple(
+                        sorted((observation.move.from_index, observation.move.to_index))
+                    ),
                 )
+                self._adopt_after_occupancy(transition_evidence)
                 self._board = verified_after
                 self._confirmed_frame = current.copy()
                 self._motion_seen = False
@@ -401,7 +412,10 @@ class StableMoveTracker:
             current,
             decision_started_ns,
             capture_timestamp_ns,
+            update_changed_occupancy_only=True,
+            accepted_changed_points=sequence.evidence.candidates[0].changed_points,
         )
+        self._adopt_after_occupancy(transition_evidence)
         self._board = verified_after
         self._confirmed_frame = current.copy()
         self._motion_seen = False
@@ -491,6 +505,9 @@ class StableMoveTracker:
         current: NDArray[np.uint8],
         decision_started_ns: int,
         capture_timestamp_ns: int | None,
+        *,
+        update_changed_occupancy_only: bool = False,
+        accepted_changed_points: tuple[int, ...] | None = None,
     ) -> TransitionCaptureEvidence | None:
         if not self._capture_transition_evidence:
             return None
@@ -510,7 +527,29 @@ class StableMoveTracker:
             observation.evidence.local_differences,
             decision_latency_ms=(completed_ns - latency_origin_ns) / 1_000_000,
             occupancy_observer=self._occupancy_observer,
+            confirmed_occupancy=self._confirmed_occupancy,
+            update_changed_occupancy_only=update_changed_occupancy_only,
+            accepted_changed_points=accepted_changed_points,
         )
+
+    def _observe_confirmed_occupancy(
+        self,
+        frame: NDArray[np.uint8],
+    ) -> OccupancyEvidence | None:
+        observer = self._occupancy_observer
+        if (
+            not self._capture_transition_evidence
+            or not isinstance(observer, IncrementalOccupancyObserver)
+        ):
+            return None
+        return observer.observe(frame, self._geometry)
+
+    def _adopt_after_occupancy(
+        self,
+        evidence: TransitionCaptureEvidence | None,
+    ) -> None:
+        if evidence is not None and evidence.after_occupancy is not None:
+            self._confirmed_occupancy = evidence.after_occupancy
 
     def invalidate_context(self) -> TrackingUpdate:
         self._blocked_status = TrackingStatus.CONTEXT_INVALID
@@ -519,6 +558,7 @@ class StableMoveTracker:
         self._motion_seen = False
         self._stable_pairs = 0
         self._pending_first_move = None
+        self._confirmed_occupancy = None
         return TrackingUpdate(TrackingStatus.CONTEXT_INVALID, self._board)
 
     def rebind_frame_size(self, frame: NDArray[np.generic]) -> TrackingUpdate:
@@ -549,6 +589,7 @@ class StableMoveTracker:
         self._motion_seen = False
         self._stable_pairs = 0
         self._pending_first_move = None
+        self._confirmed_occupancy = self._observe_confirmed_occupancy(current)
         return TrackingUpdate(TrackingStatus.WATCHING, self._board)
 
     def mark_desynchronized(self) -> TrackingUpdate:
@@ -581,6 +622,7 @@ class StableMoveTracker:
         self._stable_pairs = 0
         self._blocked_status = None
         self._pending_first_move = None
+        self._confirmed_occupancy = self._observe_confirmed_occupancy(current)
         return TrackingUpdate(TrackingStatus.WATCHING, self._board)
 
 

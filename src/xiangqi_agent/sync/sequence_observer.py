@@ -22,11 +22,20 @@ from xiangqi_agent.sync.sequence_gate import (
     SequenceDecisionGate,
     SequenceThresholdProfile,
 )
+from xiangqi_agent.sync.two_ply_profile import (
+    TWO_PLY_FEATURE_VERSION,
+    TWO_PLY_INSTANCE_TRANSFER_MAX_SHIFT,
+    TWO_PLY_MINIMUM_SEMANTIC_CONFIDENCE,
+)
 from xiangqi_agent.vision.endpoint_features import InstanceTransferExtractor
 from xiangqi_agent.vision.geometry import BoardGeometry
-from xiangqi_agent.vision.templates import PieceTemplateBank, TemplateMatch
+from xiangqi_agent.vision.templates import (
+    PieceTemplateBankCache,
+    TemplateClassification,
+    TemplateMatch,
+)
 
-_FEATURE_VERSION = "two-ply-template-transfer-v5"
+_FEATURE_VERSION = TWO_PLY_FEATURE_VERSION
 _REPLY_CONSTRAINED_FEATURE_VERSION = _FEATURE_VERSION
 
 
@@ -65,8 +74,9 @@ class LegalTwoPlyDiffObserver:
         min_margin: float = 5.0,
         max_template_distance: float = 0.18,
         min_template_margin: float = 0.02,
-        min_template_confidence: float = 0.8,
+        min_template_confidence: float = TWO_PLY_MINIMUM_SEMANTIC_CONFIDENCE,
         committer: StateCommitter | None = None,
+        template_cache: PieceTemplateBankCache | None = None,
     ) -> None:
         if isinstance(patch_size, bool) or not isinstance(patch_size, int) or patch_size <= 0:
             raise ValueError("patch_size must be a positive integer")
@@ -84,6 +94,12 @@ class LegalTwoPlyDiffObserver:
             )
         )
         self._committer = committer or RuleStateCommitter()
+        if template_cache is not None and not isinstance(
+            template_cache,
+            PieceTemplateBankCache,
+        ):
+            raise TypeError("template_cache must be a PieceTemplateBankCache")
+        self._template_cache = template_cache or PieceTemplateBankCache()
 
     def observe(
         self,
@@ -144,12 +160,13 @@ class LegalTwoPlyDiffObserver:
         if projections is None:
             projections = self._project_from_changed_sources(board, local)
 
-        templates = PieceTemplateBank.from_position(
+        templates = self._template_cache.get(
             board,
             geometry,
             before,
             patch_size=self._patch_size,
         )
+        classification_cache: dict[int, TemplateClassification] = {}
         match_cache: dict[tuple[int, str], TemplateMatch] = {}
         confidence_components: dict[tuple[Move, Move], tuple[float, float]] = {}
         candidates: list[SequenceCandidateEvidence] = []
@@ -171,7 +188,11 @@ class LegalTwoPlyDiffObserver:
                     key = (index, symbol)
                     match = match_cache.get(key)
                     if match is None:
-                        match = templates.match(symbol, after_patches[index])
+                        classification = classification_cache.get(index)
+                        if classification is None:
+                            classification = templates.classify(after_patches[index])
+                            classification_cache[index] = classification
+                        match = classification.match(symbol)
                         match_cache[key] = match
                     endpoint_matches.append(match)
             except ValueError:
@@ -206,10 +227,11 @@ class LegalTwoPlyDiffObserver:
                     key = (index, "".join(sorted(expected_symbols)))
                     match = match_cache.get(key)
                     if match is None:
-                        match = templates.match_any(
-                            expected_symbols,
-                            after_patches[index],
-                        )
+                        classification = classification_cache.get(index)
+                        if classification is None:
+                            classification = templates.classify(after_patches[index])
+                            classification_cache[index] = classification
+                        match = classification.match_any(expected_symbols)
                         match_cache[key] = match
                     artifact_matches.append(match)
                     if (
@@ -359,7 +381,9 @@ def _piece_transfer_confidence(
         if second.to_index != first.to_index
         else (second,)
     )
-    extractor = InstanceTransferExtractor()
+    extractor = InstanceTransferExtractor(
+        max_shift=TWO_PLY_INSTANCE_TRANSFER_MAX_SHIFT
+    )
     scores = tuple(
         extractor.extract(
             EndpointCrops(

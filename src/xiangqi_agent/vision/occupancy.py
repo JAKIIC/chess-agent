@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from math import isfinite
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 import cv2
 import numpy as np
@@ -86,6 +86,17 @@ class OccupancyObserver(Protocol):
     ) -> OccupancyEvidence: ...
 
 
+@runtime_checkable
+class IncrementalOccupancyObserver(OccupancyObserver, Protocol):
+    def observe_changed(
+        self,
+        frame: NDArray[np.uint8],
+        geometry: BoardGeometry,
+        baseline: OccupancyEvidence,
+        point_indices: tuple[int, ...],
+    ) -> OccupancyEvidence: ...
+
+
 class CircularOccupancyObserver:
     algorithm_version = "circular-occupancy-v1"
 
@@ -151,6 +162,55 @@ class KnownPositionOccupancyObserver:
             self._bank = bank
             self._patch_size = patch_size
         return evidence
+
+    def observe_changed(
+        self,
+        frame: NDArray[np.uint8],
+        geometry: BoardGeometry,
+        baseline: OccupancyEvidence,
+        point_indices: tuple[int, ...],
+    ) -> OccupancyEvidence:
+        if not isinstance(geometry, BoardGeometry):
+            raise TypeError("geometry must be a BoardGeometry")
+        if not isinstance(baseline, OccupancyEvidence):
+            raise TypeError("baseline must be OccupancyEvidence")
+        if baseline.algorithm_version != self.algorithm_version:
+            raise ValueError("baseline occupancy algorithm does not match observer")
+        if (
+            not isinstance(point_indices, tuple)
+            or not point_indices
+            or tuple(sorted(set(point_indices))) != point_indices
+            or any(
+                isinstance(index, bool)
+                or not isinstance(index, int)
+                or not 0 <= index < 90
+                for index in point_indices
+            )
+        ):
+            raise ValueError("point_indices must contain unique sorted board indices")
+        bank = self._bank
+        patch_size = self._patch_size
+        if bank is None or patch_size is None:
+            raise RuntimeError("known-position occupancy must be calibrated first")
+        patches = geometry.crop_selected_intersections(
+            frame,
+            point_indices,
+            size=patch_size,
+        )
+        occupied = list(baseline.occupied)
+        confidences = list(baseline.confidences)
+        for index, patch in zip(point_indices, patches, strict=True):
+            empty_distance, occupied_distance = bank.occupancy_distances(patch)
+            separation = abs(empty_distance - occupied_distance)
+            occupied[index] = occupied_distance < empty_distance
+            confidences[index] = _clamp(
+                separation / (empty_distance + occupied_distance + 1e-6)
+            )
+        return OccupancyEvidence(
+            tuple(occupied),
+            tuple(confidences),
+            self.algorithm_version,
+        )
 
 
 def compare_occupancy(
