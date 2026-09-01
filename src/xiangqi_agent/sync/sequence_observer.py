@@ -22,7 +22,7 @@ from xiangqi_agent.sync.sequence_gate import (
 from xiangqi_agent.vision.geometry import BoardGeometry
 from xiangqi_agent.vision.templates import PieceTemplateBank, TemplateMatch
 
-_FEATURE_VERSION = "two-ply-template-v3"
+_FEATURE_VERSION = "two-ply-template-v4"
 _REPLY_CONSTRAINED_FEATURE_VERSION = _FEATURE_VERSION
 
 
@@ -76,7 +76,7 @@ class LegalTwoPlyDiffObserver:
                 max_template_distance=max_template_distance,
                 min_template_margin=min_template_margin,
                 min_template_confidence=min_template_confidence,
-                profile_version="human-ai-two-ply-v1",
+                profile_version="human-ai-two-ply-v2",
             )
         )
         self._committer = committer or RuleStateCommitter()
@@ -174,6 +174,27 @@ class LegalTwoPlyDiffObserver:
                 continue
             expected_floor = min(local[index] for index in changed_points)
             changed = frozenset(changed_points)
+            artifact_points = tuple(
+                index
+                for index, difference in enumerate(local)
+                if index not in changed
+                and difference > self._gate.profile.max_unexpected_difference
+            )
+            try:
+                # A bounded outside difference can only be treated as UI
+                # highlight/shadow when the final patch still matches the
+                # unchanged board symbol's occupancy/side semantics.
+                for index in artifact_points:
+                    symbol = board.pieces[index]
+                    key = (index, symbol)
+                    match = match_cache.get(key)
+                    if match is None:
+                        match = templates.match(symbol, after_patches[index])
+                        match_cache[key] = match
+                    matches.append(match)
+            except ValueError:
+                template_unavailable = True
+                continue
             unexpected = max(
                 (
                     difference

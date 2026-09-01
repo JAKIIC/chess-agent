@@ -22,6 +22,7 @@ from tests.unit.diagnostics.test_stage_c_quarantine import _event
 from tests.unit.diagnostics.test_stage_c_samples import _crops, _sample
 from xiangqi_agent.diagnostics.stage_c_gate import (
     DEFAULT_STAGE_C_FEATURE_VERSION,
+    DEFAULT_STAGE_C_THRESHOLD_PROFILE,
     StageCGateIntegrityError,
     freeze_human_ai_stage_c,
     freeze_reviewed_human_ai_stage_c,
@@ -53,6 +54,10 @@ def test_legacy_v1_freeze_remains_available_as_a_read_only_api(tmp_path: Path) -
         root,
         "legacy-frozen.json",
         feature_version="two-ply-template-v1",
+        threshold_profile=replace(
+            DEFAULT_STAGE_C_THRESHOLD_PROFILE,
+            profile_version="human-ai-two-ply-v1",
+        ),
         created_at_utc="2026-09-01T00:00:00Z",
     )
 
@@ -74,9 +79,10 @@ def _record(
         event_id=sample_id,
         session_id=session_id,
         feature_version=feature or DEFAULT_STAGE_C_FEATURE_VERSION,
+        threshold_profile_version=(
+            profile or DEFAULT_STAGE_C_THRESHOLD_PROFILE.profile_version
+        ),
     )
-    if profile is not None:
-        event = replace(event, threshold_profile_version=profile)
     event_dir = record_quarantine_event(source_root, event)
     review_path = _review_valid(source_root, event_dir)
     return StageCPromotionService().promote(event_dir, review_path, root)
@@ -105,6 +111,7 @@ def _record_rejection(
         event_id=sample_id,
         session_id=session_id,
         feature_version=DEFAULT_STAGE_C_FEATURE_VERSION,
+        threshold_profile_version=DEFAULT_STAGE_C_THRESHOLD_PROFILE.profile_version,
     )
     event_dir = record_quarantine_event(source_root, event)
     review_path = _review_rejection(source_root, event_dir, scenario, moves)
@@ -134,7 +141,7 @@ def test_freeze_cli_writes_sorted_portable_hash_locked_manifest(
         "min_score": 5.0,
         "min_template_confidence": 0.8,
         "min_template_margin": 0.02,
-        "profile_version": "human-ai-two-ply-v1",
+        "profile_version": "human-ai-two-ply-v2",
     }
     paths = [entry["relative_path"] for entry in payload["samples"]]
     assert paths == sorted(paths)
@@ -254,7 +261,13 @@ def test_reviewed_only_freeze_accepts_promoted_v2_and_is_self_contained(
 ) -> None:
     event_dir = record_quarantine_event(
         tmp_path,
-        replace(_event(), feature_version=DEFAULT_STAGE_C_FEATURE_VERSION),
+        replace(
+            _event(),
+            feature_version=DEFAULT_STAGE_C_FEATURE_VERSION,
+            threshold_profile_version=(
+                DEFAULT_STAGE_C_THRESHOLD_PROFILE.profile_version
+            ),
+        ),
     )
     review_path = _review_valid(tmp_path, event_dir)
     reviewed = _reviewed_root(tmp_path)

@@ -44,6 +44,15 @@ def _move(board: BoardState, uci: str) -> Move:
     return next(move for move in legal_moves(board) if move.uci == uci)
 
 
+def _paint_cell(frame: np.ndarray, index: int, value: int) -> None:
+    row, column = divmod(index, 9)
+    frame[
+        row * CELL : (row + 1) * CELL,
+        column * CELL : (column + 1) * CELL,
+        :3,
+    ] = value
+
+
 def test_two_ply_observer_accepts_the_only_legal_chain_matching_final_frame() -> None:
     board = parse_fen(START)
     first = _move(board, "h2e2")
@@ -61,7 +70,7 @@ def test_two_ply_observer_accepts_the_only_legal_chain_matching_final_frame() ->
     assert proposal.status is ObservationStatus.ACCEPTED
     assert proposal.moves == (first, second)
     assert proposal.evidence.candidates[0].final_position_id == final.position_id
-    assert proposal.evidence.feature_version == "two-ply-template-v3"
+    assert proposal.evidence.feature_version == "two-ply-template-v4"
 
 
 def test_two_ply_observer_only_scores_replies_after_a_confirmed_first_move() -> None:
@@ -81,7 +90,7 @@ def test_two_ply_observer_only_scores_replies_after_a_confirmed_first_move() -> 
 
     assert proposal.status is ObservationStatus.ACCEPTED
     assert proposal.moves == (first, second)
-    assert proposal.evidence.feature_version == "two-ply-template-v3"
+    assert proposal.evidence.feature_version == "two-ply-template-v4"
     assert all(
         candidate.moves[0] == first for candidate in proposal.evidence.candidates
     )
@@ -193,6 +202,57 @@ def test_two_ply_observer_rejects_an_unrelated_strong_change() -> None:
     assert proposal.status is ObservationStatus.AMBIGUOUS
     assert proposal.moves == ()
     assert "outside_change" in proposal.evidence.rejection_reasons
+
+
+def test_two_ply_observer_tolerates_weak_highlight_artifacts_that_keep_semantics() -> None:
+    board = parse_fen(START)
+    first = _move(board, "h2e2")
+    middle = apply_move(board, first)
+    second = _move(middle, "h7e7")
+    final = apply_move(middle, second)
+    frame = _render(final)
+    # Model fixed-theme last-move tint: the final pieces resemble another piece
+    # of the same side, so exact-symbol margin falls while side/occupancy remains.
+    _paint_cell(frame, 22, PALETTE["r"])
+    _paint_cell(frame, 67, PALETTE["R"])
+    # Model weaker shadow/highlight spill on unchanged empty intersections.
+    _paint_cell(frame, 16, 21)
+    _paint_cell(frame, 78, 21)
+
+    proposal = LegalTwoPlyDiffObserver(patch_size=CELL).observe(
+        board,
+        _render(board),
+        frame,
+        _geometry(),
+    )
+
+    assert proposal.status is ObservationStatus.ACCEPTED
+    assert proposal.moves == (first, second)
+    assert proposal.evidence.candidates[0].unexpected_difference == 6.0
+
+
+def test_two_ply_observer_rejects_a_weak_outside_semantic_change() -> None:
+    board = parse_fen(START)
+    first = _move(board, "h2e2")
+    middle = apply_move(board, first)
+    second = _move(middle, "h7e7")
+    final = apply_move(middle, second)
+    frame = _render(final)
+    _paint_cell(frame, 22, PALETTE["r"])
+    _paint_cell(frame, 67, PALETTE["R"])
+    # This is weak enough for the artifact ratio, but changes empty -> occupied.
+    _paint_cell(frame, 16, PALETTE["K"])
+
+    proposal = LegalTwoPlyDiffObserver(patch_size=CELL).observe(
+        board,
+        _render(board),
+        frame,
+        _geometry(),
+    )
+
+    assert proposal.status is ObservationStatus.AMBIGUOUS
+    assert proposal.moves == ()
+    assert "template_confidence" in proposal.evidence.rejection_reasons
 
 
 def test_two_ply_observer_meets_the_stable_frame_decision_budget() -> None:

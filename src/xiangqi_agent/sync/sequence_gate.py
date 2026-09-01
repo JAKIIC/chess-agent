@@ -5,6 +5,9 @@ from math import isfinite
 
 from xiangqi_agent.sync.evidence import SequenceCandidateEvidence
 
+_SEMANTIC_ARTIFACT_PROFILE_VERSION = "human-ai-two-ply-v2"
+_MAX_RELATIVE_ARTIFACT_DIFFERENCE = 0.30
+
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class SequenceThresholdProfile:
@@ -83,10 +86,23 @@ class SequenceDecisionGate:
         best = candidates[0]
         next_score = candidates[1].score if len(candidates) > 1 else 0.0
         profile = self._profile
+        semantic_artifact_profile = (
+            profile.profile_version == _SEMANTIC_ARTIFACT_PROFILE_VERSION
+        )
+        unexpected_limit = profile.max_unexpected_difference
+        if semantic_artifact_profile:
+            # V2 observers fold every above-baseline outside patch into the
+            # template distance/confidence minima. The relative allowance is
+            # therefore only for presentation artifacts that still preserve
+            # the confirmed empty/red/black semantic class.
+            unexpected_limit = max(
+                unexpected_limit,
+                best.expected_change_floor * _MAX_RELATIVE_ARTIFACT_DIFFERENCE,
+            )
         reasons: list[str] = []
         if best.expected_change_floor < profile.min_local_difference:
             reasons.append("expected_change")
-        if best.unexpected_difference > profile.max_unexpected_difference:
+        if best.unexpected_difference > unexpected_limit:
             reasons.append("outside_change")
         if best.score < profile.min_score:
             reasons.append("candidate_score")
@@ -94,7 +110,13 @@ class SequenceDecisionGate:
             reasons.append("candidate_margin")
         if best.maximum_template_distance > profile.max_template_distance:
             reasons.append("template_distance")
-        if best.minimum_template_margin < profile.min_template_margin:
+        if (
+            best.minimum_template_margin < profile.min_template_margin
+            and not semantic_artifact_profile
+        ):
+            # Exact piece-class margin is advisory in V2. Legal-chain
+            # uniqueness identifies the piece; distance and semantic
+            # confidence remain hard gates under last-move tinting.
             reasons.append("template_margin")
         if best.minimum_template_confidence < profile.min_template_confidence:
             reasons.append("template_confidence")
