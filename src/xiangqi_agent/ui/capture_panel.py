@@ -320,9 +320,7 @@ class CapturePanel(QWidget):
             except (RuntimeError, TypeError, ValueError) as exc:
                 self.status_label.setText(f"当前局面无效：{exc}")
                 return
-            occupancy_observer = (
-                self._occupancy_observer_factory(board) if evidence_mode else None
-            )
+            occupancy_observer = self._occupancy_observer_factory(board)
             self._session = LiveSyncSession(
                 source,
                 board,
@@ -332,7 +330,7 @@ class CapturePanel(QWidget):
                 patch_size=self._patch_size,
                 capture_transition_evidence=evidence_mode,
                 occupancy_observer=occupancy_observer,
-                require_matching_baseline=evidence_mode,
+                require_matching_baseline=True,
                 require_atomic_two_ply=evidence_mode,
             )
             if evidence_mode:

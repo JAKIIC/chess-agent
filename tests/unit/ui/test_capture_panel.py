@@ -166,6 +166,45 @@ def test_capture_panel_emits_rule_confirmed_board_updates(qtbot: object) -> None
     panel.close_capture()
 
 
+def test_capture_panel_rejects_a_mismatched_baseline_without_saving_evidence(
+    qtbot: object,
+) -> None:
+    board = parse_fen(START)
+    moved = apply_move(
+        board,
+        next(move for move in legal_moves(board) if move.uci == "h2e2"),
+    )
+    target = WindowInfo(42, "天天象棋", "WeChatAppEx.exe", (216, 240))
+    source = FakeFrameSource(target.hwnd)
+    panel = CapturePanel(
+        catalog=FakeCatalog((target,)),
+        source_factory=lambda _: source,
+        board_provider=lambda: board,
+        patch_size=CELL,
+    )
+    updates: list[LiveSyncUpdate] = []
+    panel.sync_update.connect(updates.append)
+    qtbot.addWidget(panel)  # type: ignore[attr-defined]
+
+    assert not panel.evidence_checkbox.isChecked()
+    panel.refresh_button.click()
+    panel.quad_input.setText(TEST_QUAD)
+    panel.connect_button.click()
+    mismatched = _render(moved)
+    source.push(mismatched, 0)
+    source.push(mismatched.copy(), 50_000_000)
+    source.push(mismatched.copy(), 100_000_000)
+
+    qtbot.waitUntil(  # type: ignore[attr-defined]
+        lambda: any(update.status is LiveSyncStatus.CONTEXT_INVALID for update in updates),
+        timeout=2000,
+    )
+
+    assert all(update.status is not LiveSyncStatus.BASELINE_READY for update in updates)
+    assert "确认 FEN" in panel.status_label.text()
+    panel.close_capture()
+
+
 def test_capture_panel_requires_explicit_mode_and_locks_it_while_connected(
     qtbot: object,
 ) -> None:
