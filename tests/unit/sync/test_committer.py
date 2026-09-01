@@ -53,3 +53,21 @@ def test_rule_committer_rejects_whole_sequence_when_second_move_is_illegal() -> 
         RuleStateCommitter().commit_sequence(board, (first, illegal_second))
 
     assert board == parse_fen(START)
+
+
+def test_rule_committer_projects_every_two_ply_chain_through_one_rule_boundary() -> None:
+    board = parse_fen(START)
+    expected_first = _move(board, "h2e2")
+    middle = RuleStateCommitter().commit(board, expected_first)
+    expected_second = _move(middle, "h7e7")
+    expected_final = RuleStateCommitter().commit(middle, expected_second)
+
+    projections = tuple(RuleStateCommitter().project_two_ply(board))
+    matching = [
+        final
+        for moves, final in projections
+        if moves == (expected_first, expected_second)
+    ]
+
+    assert matching == [expected_final]
+    assert all(len(moves) == 2 for moves, _final in projections)

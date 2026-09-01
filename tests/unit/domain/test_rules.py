@@ -2,7 +2,13 @@ import pytest
 
 from xiangqi_agent.domain.board import Move, Orientation
 from xiangqi_agent.domain.fen import parse_fen
-from xiangqi_agent.domain.rules import apply_move, detect_unique_move, is_in_check, legal_moves
+from xiangqi_agent.domain.rules import (
+    apply_move,
+    detect_unique_move,
+    is_in_check,
+    legal_moves,
+    legal_successors,
+)
 
 
 def moves(board_fen: str) -> set[str]:
@@ -135,6 +141,18 @@ def test_apply_move_rejects_non_legal_or_mismatched_move() -> None:
 def test_legal_moves_have_deterministic_order() -> None:
     board = parse_fen("4k4/9/9/9/9/9/9/9/9/4K4 w")
     assert tuple(move.uci for move in legal_moves(board)) == ("e0d0", "e0f0")
+
+
+def test_legal_successors_pair_each_ordered_move_with_its_resulting_board() -> None:
+    board = parse_fen("4k4/9/9/9/9/4P4/9/9/4R4/4K4 w")
+    expected_moves = legal_moves(board)
+
+    successors = legal_successors(board)
+
+    assert tuple(move for move, _after in successors) == expected_moves
+    assert tuple(after for _move, after in successors) == tuple(
+        apply_move(board, move) for move in expected_moves
+    )
 
 
 def test_detect_unique_capture_ignores_orientation_and_ply() -> None:

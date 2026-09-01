@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
 from typing import Protocol
 
 from xiangqi_agent.domain.board import BoardState, Move
-from xiangqi_agent.domain.rules import apply_move
+from xiangqi_agent.domain.rules import apply_move, legal_successors
 
 
 class StateCommitter(Protocol):
@@ -16,6 +17,11 @@ class StateCommitter(Protocol):
         board: BoardState,
         moves: tuple[Move, Move],
     ) -> BoardState: ...
+
+    def project_two_ply(
+        self,
+        board: BoardState,
+    ) -> Iterator[tuple[tuple[Move, Move], BoardState]]: ...
 
 
 class RuleStateCommitter:
@@ -40,3 +46,11 @@ class RuleStateCommitter:
         if len(moves) != 2:
             raise ValueError("atomic sequence must contain exactly two moves")
         return self.project(board, moves)
+
+    def project_two_ply(
+        self,
+        board: BoardState,
+    ) -> Iterator[tuple[tuple[Move, Move], BoardState]]:
+        for first, middle in legal_successors(board):
+            for second, final in legal_successors(middle):
+                yield (first, second), final

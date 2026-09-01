@@ -16,14 +16,24 @@ _GENERAL_COUNT_ERROR = "board must contain exactly one K and one k"
 
 def legal_moves(board: BoardState) -> tuple[Move, ...]:
     """Return all legal moves for the side to move in a stable order."""
+    return tuple(move for move, _after in legal_successors(board))
+
+
+def legal_successors(board: BoardState) -> tuple[tuple[Move, BoardState], ...]:
+    """Return each legal move paired with its immutable resulting position."""
     _validate_generals(board)
     side = board.side_to_move
-    legal = (
-        move
+    successors = (
+        (move, after)
         for move in _pseudo_legal_moves(board, side)
-        if not is_in_check(_apply_unchecked(board, move), side)
+        if not is_in_check(after := _apply_unchecked(board, move), side)
     )
-    return tuple(sorted(legal, key=lambda move: (move.from_index, move.uci)))
+    return tuple(
+        sorted(
+            successors,
+            key=lambda item: (item[0].from_index, item[0].uci),
+        )
+    )
 
 
 def apply_move(board: BoardState, move: Move) -> BoardState:
