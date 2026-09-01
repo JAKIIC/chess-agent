@@ -76,6 +76,15 @@ _ALLOWED_REJECTION_REASONS = frozenset(
 class QuarantineCollectionError(RuntimeError):
     """One unlabelled Stage C event could not be isolated safely."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        terminal_status: LiveSyncStatus | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.terminal_status = terminal_status
+
 
 class QuarantineCollectionTimeout(QuarantineCollectionError):
     """No terminal Stage C event arrived before the explicit deadline."""
@@ -229,7 +238,8 @@ def collect_human_ai_quarantine_event(
                 LiveSyncStatus.CLOSED,
             ):
                 raise QuarantineCollectionError(
-                    f"quarantine collection stopped safely: {update.status.value}"
+                    f"quarantine collection stopped safely: {update.status.value}",
+                    terminal_status=update.status,
                 )
     finally:
         session.close()
@@ -468,11 +478,14 @@ def main(
             occupancy_observer=occupancy_observer,
         )
     except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        payload = {"status": "collection_error", "code": _error_code(exc)}
+        if (
+            isinstance(exc, QuarantineCollectionError)
+            and exc.terminal_status is not None
+        ):
+            payload["terminal_status"] = exc.terminal_status.value
         print(
-            json.dumps(
-                {"status": "collection_error", "code": _error_code(exc)},
-                sort_keys=True,
-            ),
+            json.dumps(payload, sort_keys=True),
             file=sys.stderr,
         )
         return 2

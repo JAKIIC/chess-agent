@@ -17,7 +17,12 @@ from scripts.collect_human_ai_quarantine import (
     main,
 )
 from xiangqi_agent.capture.fake import FakeFrameSource
-from xiangqi_agent.capture.protocol import CaptureFrame, ClosedCallback, FrameCallback
+from xiangqi_agent.capture.protocol import (
+    CaptureClosedError,
+    CaptureFrame,
+    ClosedCallback,
+    FrameCallback,
+)
 from xiangqi_agent.domain.board import BoardState
 from xiangqi_agent.domain.fen import parse_fen
 from xiangqi_agent.domain.rules import apply_move, legal_moves
@@ -288,6 +293,36 @@ def test_cli_collects_one_event_without_printing_window_title_or_moves(
     assert len(tuple(_quarantine_root(tmp_path).rglob("manifest.json"))) == 1
 
 
+def test_cli_reports_terminal_status_without_exposing_capture_message(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    source = _ClosingScriptedSource((_render(START),) * 3)
+    window = WindowInfo(
+        hwnd=42,
+        title="天天象棋",
+        process_name="WeChatAppEx.exe",
+        client_size=(216, 240),
+    )
+
+    exit_code = main(
+        _cli_arguments(tmp_path),
+        catalog=_Catalog((window,)),
+        source_factory=lambda _window: source,
+        allowed_local_root=_local_root(tmp_path),
+        occupancy_observer=_SequenceOccupancyObserver((_occupancy(START),)),
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 2
+    assert json.loads(captured.err) == {
+        "code": "collection_stopped",
+        "status": "collection_error",
+        "terminal_status": "closed",
+    }
+    assert "private capture detail" not in captured.err
+
+
 def _launch(
     tmp_path: Path,
     source: _NotifyingFakeSource,
@@ -464,3 +499,22 @@ class _ScriptedSource:
 
     def close(self) -> None:
         self._closed = True
+
+
+class _ClosingScriptedSource(_ScriptedSource):
+    def start(
+        self,
+        on_frame: FrameCallback,
+        on_closed: ClosedCallback | None = None,
+    ) -> None:
+        def emit() -> None:
+            for index, frame in enumerate(self._frames):
+                sleep(0.03)
+                if self._closed:
+                    return
+                on_frame(CaptureFrame(index * 110_000_000, 42, frame))
+            sleep(0.03)
+            if not self._closed and on_closed is not None:
+                on_closed(CaptureClosedError("private capture detail"))
+
+        Thread(target=emit, daemon=True).start()
