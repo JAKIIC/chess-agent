@@ -83,6 +83,54 @@ def test_unlabelled_collector_records_only_after_one_atomic_terminal_event(
     assert source.close_calls == 1
 
 
+def test_unlabelled_collector_waits_for_ai_reply_after_stable_first_ply(
+    tmp_path: Path,
+) -> None:
+    first = next(move for move in legal_moves(START) if move.uci == "h2e2")
+    middle = apply_move(START, first)
+    second = next(move for move in legal_moves(middle) if move.uci == "h7e7")
+    final = apply_move(middle, second)
+    source = _NotifyingFakeSource()
+    worker, updates, outcome = _launch(
+        tmp_path,
+        source,
+        observer=_SequenceOccupancyObserver(
+            (_occupancy(START), _occupancy(START), _occupancy(final))
+        ),
+        event_id="stable-intermediate",
+    )
+    _establish_baseline(source, updates)
+
+    intermediate = _render(middle)
+    source.push(intermediate, 150_000_000)
+    source.push(intermediate.copy(), 260_000_000)
+    _wait_until(
+        lambda: any(
+            getattr(update, "status", None) is LiveSyncStatus.WAITING_FOR_REPLY
+            for update in updates
+        )
+    )
+
+    assert worker.is_alive()
+    assert not tuple(_quarantine_root(tmp_path).rglob("manifest.json"))
+
+    completed = _render(final)
+    source.push(completed, 310_000_000)
+    source.push(completed.copy(), 420_000_000)
+    worker.join(3.0)
+
+    assert not worker.is_alive()
+    assert "error" not in outcome
+    event_dir = outcome["path"]
+    assert isinstance(event_dir, Path)
+    payload = json.loads((event_dir / "manifest.json").read_text("utf-8"))
+    assert payload["observed_status"] == "accepted"
+    assert payload["observed_moves_uci"] == ["h2e2", "h7e7"]
+    assert payload["after_occupancy"]["occupied"] == [
+        piece != "." for piece in final.pieces
+    ]
+
+
 def test_unlabelled_collector_rejects_mismatched_baseline_without_output(
     tmp_path: Path,
 ) -> None:

@@ -8,6 +8,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from xiangqi_agent.domain.board import BoardState, Move
+from xiangqi_agent.domain.rules import legal_moves
 from xiangqi_agent.sync.committer import RuleStateCommitter, StateCommitter
 from xiangqi_agent.sync.evidence import (
     MoveProposal,
@@ -34,6 +35,7 @@ class TrackingStatus(StrEnum):
     WATCHING = "watching"
     WAITING_FOR_STABLE = "waiting_for_stable"
     WAITING_FOR_ENDPOINT = "waiting_for_endpoint"
+    WAITING_FOR_REPLY = "waiting_for_reply"
     ACCEPTED = "accepted"
     PAUSED_AMBIGUOUS = "paused_ambiguous"
     CONTEXT_INVALID = "context_invalid"
@@ -72,6 +74,7 @@ class StableMoveTracker:
         patch_size: int = 32,
         capture_transition_evidence: bool = False,
         occupancy_observer: OccupancyObserver | None = None,
+        require_atomic_two_ply: bool = False,
     ) -> None:
         if required_stable_pairs <= 0:
             raise ValueError("required_stable_pairs must be positive")
@@ -79,6 +82,10 @@ class StableMoveTracker:
             raise TypeError("mode must be a SyncMode")
         if not isinstance(capture_transition_evidence, bool):
             raise TypeError("capture_transition_evidence must be a boolean")
+        if not isinstance(require_atomic_two_ply, bool):
+            raise TypeError("require_atomic_two_ply must be a boolean")
+        if require_atomic_two_ply and mode is not SyncMode.HUMAN_VS_AI:
+            raise ValueError("atomic two-ply tracking requires human-vs-AI mode")
         self._board = board
         self._geometry = geometry
         self._observer = observer
@@ -89,6 +96,7 @@ class StableMoveTracker:
         self._patch_size = patch_size
         self._capture_transition_evidence = capture_transition_evidence
         self._occupancy_observer = occupancy_observer
+        self._require_atomic_two_ply = require_atomic_two_ply
         self._mode = mode
         self._sequence_observer = sequence_observer
         if self._mode is SyncMode.HUMAN_VS_AI and self._sequence_observer is None:
@@ -101,6 +109,7 @@ class StableMoveTracker:
         self._motion_seen = False
         self._stable_pairs = 0
         self._blocked_status: TrackingStatus | None = None
+        self._pending_first_move: Move | None = None
 
     @property
     def board(self) -> BoardState:
@@ -117,6 +126,7 @@ class StableMoveTracker:
         self._motion_seen = False
         self._stable_pairs = 0
         self._blocked_status = None
+        self._pending_first_move = None
         return TrackingUpdate(TrackingStatus.WATCHING, self._board)
 
     def push(
@@ -158,6 +168,8 @@ class StableMoveTracker:
             self._stable_pairs = 0
             return TrackingUpdate(TrackingStatus.WAITING_FOR_STABLE, self._board)
         if not self._motion_seen:
+            if self._pending_first_move is not None:
+                return TrackingUpdate(TrackingStatus.WAITING_FOR_REPLY, self._board)
             return TrackingUpdate(TrackingStatus.WATCHING, self._board)
 
         self._stable_pairs += 1
@@ -179,36 +191,54 @@ class StableMoveTracker:
                     decision_started_ns,
                     capture_timestamp_ns,
                 )
-            try:
-                verified_after = self._committer.commit(self._board, observation.move)
-            except ValueError:
-                return self._pause(
-                    _failed_observation(observation, "rule_commit_failed"),
+            if self._require_atomic_two_ply:
+                if self._pending_first_move is None:
+                    try:
+                        self._committer.commit(self._board, observation.move)
+                    except ValueError:
+                        return self._pause(
+                            _failed_observation(observation, "rule_commit_failed"),
+                            current,
+                            decision_started_ns,
+                            capture_timestamp_ns,
+                        )
+                    return self._wait_for_reply(
+                        observation.move,
+                        observation,
+                        current,
+                    )
+            else:
+                try:
+                    verified_after = self._committer.commit(self._board, observation.move)
+                except ValueError:
+                    return self._pause(
+                        _failed_observation(observation, "rule_commit_failed"),
+                        current,
+                        decision_started_ns,
+                        capture_timestamp_ns,
+                    )
+                transition_evidence = self._build_transition_evidence(
+                    observation,
                     current,
                     decision_started_ns,
                     capture_timestamp_ns,
                 )
-            transition_evidence = self._build_transition_evidence(
-                observation,
-                current,
-                decision_started_ns,
-                capture_timestamp_ns,
-            )
-            self._board = verified_after
-            self._confirmed_frame = current.copy()
-            self._motion_seen = False
-            self._stable_pairs = 0
-            return TrackingUpdate(
-                TrackingStatus.ACCEPTED,
-                self._board,
-                (observation.move,),
-                observation,
-                transition_evidence,
-            )
+                self._board = verified_after
+                self._confirmed_frame = current.copy()
+                self._motion_seen = False
+                self._stable_pairs = 0
+                return TrackingUpdate(
+                    TrackingStatus.ACCEPTED,
+                    self._board,
+                    (observation.move,),
+                    observation,
+                    transition_evidence,
+                )
         if observation.status is ObservationStatus.NO_CHANGE:
             self._confirmed_frame = current.copy()
             self._motion_seen = False
             self._stable_pairs = 0
+            self._pending_first_move = None
             return TrackingUpdate(TrackingStatus.WATCHING, self._board)
         if _is_incomplete_endpoint_transition(observation):
             self._motion_seen = True
@@ -236,6 +266,16 @@ class StableMoveTracker:
             )
             if sequence.status is ObservationStatus.ACCEPTED:
                 sequence_moves = (sequence.moves[0], sequence.moves[1])
+                if (
+                    self._pending_first_move is not None
+                    and sequence_moves[0] != self._pending_first_move
+                ):
+                    return self._pause(
+                        _failed_observation(sequence, "intermediate_move_mismatch"),
+                        current,
+                        decision_started_ns,
+                        capture_timestamp_ns,
+                    )
                 if (
                     not sequence.evidence.candidates
                     or sequence.evidence.candidates[0].moves != sequence_moves
@@ -278,6 +318,7 @@ class StableMoveTracker:
                 self._confirmed_frame = current.copy()
                 self._motion_seen = False
                 self._stable_pairs = 0
+                self._pending_first_move = None
                 return TrackingUpdate(
                     TrackingStatus.ACCEPTED,
                     self._board,
@@ -285,12 +326,21 @@ class StableMoveTracker:
                     sequence,
                     transition_evidence,
                 )
+            if self._require_atomic_two_ply and self._pending_first_move is None:
+                intermediate = self._unique_intermediate_move(current)
+                if intermediate is not None:
+                    return self._wait_for_reply(intermediate, observation, current)
             return self._pause(
                 sequence,
                 current,
                 decision_started_ns,
                 capture_timestamp_ns,
             )
+
+        if self._require_atomic_two_ply and self._pending_first_move is None:
+            intermediate = self._unique_intermediate_move(current)
+            if intermediate is not None:
+                return self._wait_for_reply(intermediate, observation, current)
 
         return self._pause(
             observation,
@@ -302,8 +352,52 @@ class StableMoveTracker:
     def _can_try_sequence(self, observation: MoveProposal) -> bool:
         if self._mode is not SyncMode.HUMAN_VS_AI:
             return False
+        if self._pending_first_move is not None:
+            return True
         reasons = frozenset(observation.evidence.rejection_reasons)
         return bool(reasons & {"outside_change", "candidate_margin", "candidate_score"})
+
+    def _unique_intermediate_move(
+        self,
+        current: NDArray[np.uint8],
+    ) -> Move | None:
+        observer = self._occupancy_observer
+        if observer is None:
+            return None
+        try:
+            observed = observer.observe(current, self._geometry).occupied
+        except (RuntimeError, TypeError, ValueError):
+            return None
+        confirmed = tuple(piece != "." for piece in self._board.pieces)
+        if observed == confirmed:
+            return None
+        candidates: list[Move] = []
+        for move in legal_moves(self._board):
+            try:
+                projected = self._committer.commit(self._board, move)
+            except ValueError:
+                continue
+            if observed == tuple(piece != "." for piece in projected.pieces):
+                candidates.append(move)
+                if len(candidates) > 1:
+                    return None
+        return candidates[0] if candidates else None
+
+    def _wait_for_reply(
+        self,
+        move: Move,
+        observation: MoveProposal,
+        current: NDArray[np.uint8],
+    ) -> TrackingUpdate:
+        self._pending_first_move = move
+        self._previous_frame = current
+        self._motion_seen = False
+        self._stable_pairs = 0
+        return TrackingUpdate(
+            TrackingStatus.WAITING_FOR_REPLY,
+            self._board,
+            observation=observation,
+        )
 
     def _pause(
         self,
@@ -358,6 +452,7 @@ class StableMoveTracker:
         self._previous_frame = None
         self._motion_seen = False
         self._stable_pairs = 0
+        self._pending_first_move = None
         return TrackingUpdate(TrackingStatus.CONTEXT_INVALID, self._board)
 
     def rebind_frame_size(self, frame: NDArray[np.generic]) -> TrackingUpdate:
@@ -387,6 +482,7 @@ class StableMoveTracker:
         self._previous_frame = current
         self._motion_seen = False
         self._stable_pairs = 0
+        self._pending_first_move = None
         return TrackingUpdate(TrackingStatus.WATCHING, self._board)
 
     def mark_desynchronized(self) -> TrackingUpdate:
@@ -418,6 +514,7 @@ class StableMoveTracker:
         self._motion_seen = False
         self._stable_pairs = 0
         self._blocked_status = None
+        self._pending_first_move = None
         return TrackingUpdate(TrackingStatus.WATCHING, self._board)
 
 

@@ -333,6 +333,7 @@ class CapturePanel(QWidget):
                 capture_transition_evidence=evidence_mode,
                 occupancy_observer=occupancy_observer,
                 require_matching_baseline=evidence_mode,
+                require_atomic_two_ply=evidence_mode,
             )
             if evidence_mode:
                 self._evidence_enabled_for_session = True
@@ -396,6 +397,8 @@ class CapturePanel(QWidget):
             self.status_label.setText("检测到画面变化，正在等待落子动画结束…")
         elif update.status is LiveSyncStatus.WAITING_FOR_ENDPOINT:
             self.status_label.setText("已看到棋子点选，正在等待完成走棋…")
+        elif update.status is LiveSyncStatus.WAITING_FOR_REPLY:
+            self.status_label.setText("第一步已稳定，正在等待人机应手…")
         elif update.status is LiveSyncStatus.MOVE_ACCEPTED:
             moves = " · ".join(move.uci for move in update.moves)
             count = "两步" if len(update.moves) == 2 else "一步"

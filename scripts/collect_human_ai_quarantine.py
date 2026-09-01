@@ -191,6 +191,7 @@ def collect_human_ai_quarantine_event(
         capture_transition_evidence=True,
         occupancy_observer=occupancy_observer or KnownPositionOccupancyObserver(board),
         require_matching_baseline=True,
+        require_atomic_two_ply=True,
     )
     deadline = monotonic() + timeout_seconds
     session.start()

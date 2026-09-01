@@ -262,11 +262,26 @@ def test_local_evidence_mode_is_off_by_default_and_requires_human_ai_mode(
     assert panel._session is not None
     assert panel._session._capture_transition_evidence is True
     assert panel._session._require_matching_baseline is True
+    assert panel._session._require_atomic_two_ply is True
     assert isinstance(
         panel._session._occupancy_observer,
         KnownPositionOccupancyObserver,
     )
     assert not panel.evidence_checkbox.isEnabled()
+
+    panel._show_live_update(
+        LiveSyncUpdate(
+            status=LiveSyncStatus.WAITING_FOR_REPLY,
+            board=board,
+            message="waiting for reply",
+            sync_mode=SyncMode.HUMAN_VS_AI,
+            frame_size=(216, 240),
+            point_count=90,
+        )
+    )
+
+    assert panel._session is not None
+    assert "等待人机应手" in panel.status_label.text()
 
     panel.close_capture()
     assert panel.evidence_checkbox.isEnabled()

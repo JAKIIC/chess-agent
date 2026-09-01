@@ -37,6 +37,7 @@ class LiveSyncStatus(StrEnum):
     WATCHING = "watching"
     WAITING_FOR_STABLE = "waiting_for_stable"
     WAITING_FOR_ENDPOINT = "waiting_for_endpoint"
+    WAITING_FOR_REPLY = "waiting_for_reply"
     MOVE_ACCEPTED = "move_accepted"
     GEOMETRY_REBOUND = "geometry_rebound"
     PAUSED_AMBIGUOUS = "paused_ambiguous"
@@ -153,6 +154,7 @@ class LiveSyncSession:
         occupancy_observer: OccupancyObserver | None = None,
         require_matching_baseline: bool = False,
         baseline_minimum_confidence: float = 0.65,
+        require_atomic_two_ply: bool = False,
     ) -> None:
         if stable_pairs <= 0:
             raise ValueError("stable_pairs must be positive")
@@ -162,6 +164,10 @@ class LiveSyncSession:
             raise TypeError("capture_transition_evidence must be a boolean")
         if not isinstance(require_matching_baseline, bool):
             raise TypeError("require_matching_baseline must be a boolean")
+        if not isinstance(require_atomic_two_ply, bool):
+            raise TypeError("require_atomic_two_ply must be a boolean")
+        if require_atomic_two_ply and sync_mode is not SyncMode.HUMAN_VS_AI:
+            raise ValueError("atomic two-ply tracking requires human-vs-AI mode")
         if require_matching_baseline and occupancy_observer is None:
             raise ValueError("matching baseline requires an occupancy observer")
         if isinstance(baseline_minimum_confidence, bool) or not isinstance(
@@ -184,6 +190,7 @@ class LiveSyncSession:
         self._occupancy_observer = occupancy_observer
         self._require_matching_baseline = require_matching_baseline
         self._baseline_minimum_confidence = float(baseline_minimum_confidence)
+        self._require_atomic_two_ply = require_atomic_two_ply
         self._events = _CoalescingEventQueue(max_frames=3)
         self._lock = Lock()
         self._processing_lock = Lock()
@@ -367,6 +374,7 @@ class LiveSyncSession:
                         patch_size=self._patch_size,
                         capture_transition_evidence=self._capture_transition_evidence,
                         occupancy_observer=self._occupancy_observer,
+                        require_atomic_two_ply=self._require_atomic_two_ply,
                     )
                     tracker.initialize(event.bgra)
                     sampler = AdaptiveBurstSampler(
@@ -459,6 +467,13 @@ class LiveSyncSession:
                 self._emit_tracking(
                     LiveSyncStatus.WAITING_FOR_ENDPOINT,
                     "selection is visible; waiting for the completed move",
+                    update,
+                    frame_size=sample.size,
+                )
+            elif update.status is TrackingStatus.WAITING_FOR_REPLY:
+                self._emit_tracking(
+                    LiveSyncStatus.WAITING_FOR_REPLY,
+                    "first move is stable; waiting for the AI reply",
                     update,
                     frame_size=sample.size,
                 )
@@ -635,6 +650,7 @@ def _set_sampling_mode(
     active = status in (
         TrackingStatus.WAITING_FOR_STABLE,
         TrackingStatus.WAITING_FOR_ENDPOINT,
+        TrackingStatus.WAITING_FOR_REPLY,
     )
     sampler.set_bursting(active)
     if isinstance(source, BurstFrameSource):
