@@ -19,6 +19,7 @@ from xiangqi_agent.sync.sequence_observer import LegalTwoPlyDiffObserver
 from xiangqi_agent.sync.tracker import StableMoveTracker, TrackingStatus
 from xiangqi_agent.sync.transition_capture import TransitionCaptureEvidence
 from xiangqi_agent.vision.geometry import BoardGeometry, NormalizedQuad
+from xiangqi_agent.vision.occupancy import OccupancyEvidence
 
 START = "rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w"
 CELL = 24
@@ -57,6 +58,7 @@ def _tracker(
     sequence_observer: object | None = None,
     committer: object | None = None,
     capture_transition_evidence: bool = False,
+    occupancy_observer: object | None = None,
 ) -> StableMoveTracker:
     return StableMoveTracker(
         board,
@@ -68,6 +70,7 @@ def _tracker(
         required_stable_pairs=2,
         patch_size=CELL,
         capture_transition_evidence=capture_transition_evidence,
+        occupancy_observer=occupancy_observer,
     )
 
 
@@ -223,6 +226,28 @@ def test_enabled_transition_capture_keeps_only_owned_top_four_point_crops() -> N
         np.array_equal(crop.after, expected)
         for crop, expected in zip(evidence.crops, after_copy, strict=True)
     )
+
+
+def test_enabled_transition_capture_attaches_before_and_after_occupancy() -> None:
+    board = parse_fen(START)
+    move = _move(board, "h2e2")
+    after = apply_move(board, move)
+    observer = _SequenceOccupancyObserver(
+        (_occupancy_for(board), _occupancy_for(after))
+    )
+    tracker = _tracker(
+        board,
+        capture_transition_evidence=True,
+        occupancy_observer=observer,
+    )
+    tracker.initialize(_render(board))
+
+    result = _settle(tracker, _render(after))
+
+    assert result.transition_evidence is not None
+    assert result.transition_evidence.before_occupancy == _occupancy_for(board)
+    assert result.transition_evidence.after_occupancy == _occupancy_for(after)
+    assert observer.remaining == 0
 
 
 def test_transition_latency_uses_the_final_capture_timestamp_when_clocks_match(
@@ -538,6 +563,20 @@ def test_tracker_context_invalidation_blocks_frames_until_explicit_recovery() ->
     assert blocked.board == board
 
 
+def test_tracker_context_invalidation_releases_full_frame_state() -> None:
+    board = parse_fen(START)
+    tracker = _tracker(board)
+    frame = _render(board)
+    tracker.initialize(frame)
+
+    invalid = tracker.invalidate_context()
+
+    assert invalid.status is TrackingStatus.CONTEXT_INVALID
+    assert tracker._confirmed_frame is None
+    assert tracker._previous_frame is None
+    assert tracker.push(frame).status is TrackingStatus.CONTEXT_INVALID
+
+
 def test_tracker_desynchronization_requires_manual_recovery() -> None:
     board = parse_fen(START)
     tracker = _tracker(board)
@@ -653,3 +692,29 @@ def test_manual_recovery_rejects_geometry_that_does_not_match_the_frame() -> Non
         )
 
     assert tracker.push(_render(board)).status is TrackingStatus.CONTEXT_INVALID
+
+
+def _occupancy_for(board: BoardState, confidence: float = 0.95) -> OccupancyEvidence:
+    return OccupancyEvidence(
+        tuple(piece != "." for piece in board.pieces),
+        (confidence,) * 90,
+        "literal-v1",
+    )
+
+
+class _SequenceOccupancyObserver:
+    def __init__(self, values: tuple[OccupancyEvidence, ...]) -> None:
+        self._values = list(values)
+
+    @property
+    def remaining(self) -> int:
+        return len(self._values)
+
+    def observe(
+        self,
+        _frame: np.ndarray,
+        _geometry: BoardGeometry,
+    ) -> OccupancyEvidence:
+        if not self._values:
+            raise AssertionError("occupancy observer received an unexpected call")
+        return self._values.pop(0)

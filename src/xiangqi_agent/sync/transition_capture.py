@@ -7,6 +7,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from xiangqi_agent.vision.geometry import BoardGeometry
+from xiangqi_agent.vision.occupancy import OccupancyEvidence, OccupancyObserver
 
 _CROP_SIZE = 48
 
@@ -34,6 +35,8 @@ class TransitionCaptureEvidence:
     local_differences: tuple[float, ...]
     crops: tuple[TransitionPointEvidence, ...]
     decision_latency_ms: float
+    before_occupancy: OccupancyEvidence | None = None
+    after_occupancy: OccupancyEvidence | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -73,15 +76,23 @@ class TransitionCaptureEvidence:
             or self.decision_latency_ms < 0
         ):
             raise ValueError("decision_latency_ms must be finite and non-negative")
+        if (self.before_occupancy is None) != (self.after_occupancy is None):
+            raise ValueError("before_occupancy and after_occupancy must both be present or absent")
+        if self.before_occupancy is not None and (
+            not isinstance(self.before_occupancy, OccupancyEvidence)
+            or not isinstance(self.after_occupancy, OccupancyEvidence)
+        ):
+            raise TypeError("occupancy snapshots must be OccupancyEvidence values")
 
 
 def build_transition_capture_evidence(
-    before: NDArray[np.generic],
-    after: NDArray[np.generic],
+    before: NDArray[np.uint8],
+    after: NDArray[np.uint8],
     geometry: BoardGeometry,
     local_differences: tuple[float, ...],
     *,
     decision_latency_ms: float,
+    occupancy_observer: OccupancyObserver | None = None,
 ) -> TransitionCaptureEvidence:
     differences = _validated_differences(local_differences)
     positive = tuple(index for index, value in enumerate(differences) if value > 0)
@@ -113,11 +124,23 @@ def build_transition_capture_evidence(
             strict=True,
         )
     )
+    before_occupancy = (
+        occupancy_observer.observe(before, geometry)
+        if occupancy_observer is not None
+        else None
+    )
+    after_occupancy = (
+        occupancy_observer.observe(after, geometry)
+        if occupancy_observer is not None
+        else None
+    )
     return TransitionCaptureEvidence(
         changed_points=selected,
         local_differences=differences,
         crops=crops,
         decision_latency_ms=decision_latency_ms,
+        before_occupancy=before_occupancy,
+        after_occupancy=after_occupancy,
     )
 
 

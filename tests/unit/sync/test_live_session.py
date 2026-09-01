@@ -19,6 +19,7 @@ from xiangqi_agent.sync.live_session import (
 )
 from xiangqi_agent.sync.mode import SyncMode
 from xiangqi_agent.vision.geometry import parse_normalized_quad
+from xiangqi_agent.vision.occupancy import OccupancyEvidence
 
 START = "rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w"
 CELL = 24
@@ -42,6 +43,14 @@ def _render(board: BoardState) -> np.ndarray:
 
 def _move(board: BoardState, uci: str):
     return next(move for move in legal_moves(board) if move.uci == uci)
+
+
+def _occupancy_for(board: BoardState, confidence: float = 0.95) -> OccupancyEvidence:
+    return OccupancyEvidence(
+        tuple(piece != "." for piece in board.pieces),
+        (confidence,) * 90,
+        "literal-v1",
+    )
 
 
 def _wait_until(predicate: object, *, timeout: float = 2.0) -> None:
@@ -88,6 +97,16 @@ class _RecoveryFirstLock:
 
     def __exit__(self, *_args: object) -> None:
         self._lock.release()
+
+
+class _SequenceOccupancyObserver:
+    def __init__(self, values: tuple[OccupancyEvidence, ...]) -> None:
+        self._values = list(values)
+
+    def observe(self, _frame: np.ndarray, _geometry: object) -> OccupancyEvidence:
+        if not self._values:
+            raise AssertionError("occupancy observer received an unexpected call")
+        return self._values.pop(0)
 
 
 def test_live_event_queue_coalesces_frames_and_preserves_terminal_events() -> None:
@@ -148,6 +167,82 @@ def test_live_session_tracks_multiple_unique_moves_without_restarting() -> None:
     assert session.board == after_black
 
     session.close()
+    session.close()
+
+
+def test_live_session_requires_an_observer_for_matching_baselines() -> None:
+    with pytest.raises(ValueError, match="occupancy observer"):
+        LiveSyncSession(
+            FakeFrameSource(hwnd=42),
+            parse_fen(START),
+            QUAD,
+            require_matching_baseline=True,
+        )
+
+
+def test_live_session_rejects_mismatched_baseline_then_recovers_when_visible() -> None:
+    board = parse_fen(START)
+    mismatched = list(_occupancy_for(board).occupied)
+    mismatched[0] = not mismatched[0]
+    observer = _SequenceOccupancyObserver(
+        (
+            OccupancyEvidence(tuple(mismatched), (0.95,) * 90, "literal-v1"),
+            _occupancy_for(board),
+        )
+    )
+    source = FakeFrameSource(hwnd=42)
+    updates = []
+    session = LiveSyncSession(
+        source,
+        board,
+        QUAD,
+        on_update=updates.append,
+        occupancy_observer=observer,
+        require_matching_baseline=True,
+        patch_size=CELL,
+        stable_pairs=2,
+    )
+    session.start()
+    baseline = _render(board)
+
+    source.push(baseline, 0)
+    source.push(baseline.copy(), 50_000_000)
+    source.push(baseline.copy(), 100_000_000)
+    _wait_until(lambda: any(update.status is LiveSyncStatus.CONTEXT_INVALID for update in updates))
+    assert all(update.status is not LiveSyncStatus.BASELINE_READY for update in updates)
+
+    source.push(baseline.copy(), 150_000_000)
+    _wait_until(lambda: any(update.status is LiveSyncStatus.BASELINE_READY for update in updates))
+
+    assert session.board == board
+    session.close()
+
+
+def test_live_session_rejects_low_confidence_baseline() -> None:
+    board = parse_fen(START)
+    observer = _SequenceOccupancyObserver((_occupancy_for(board, confidence=0.64),))
+    source = FakeFrameSource(hwnd=42)
+    updates = []
+    session = LiveSyncSession(
+        source,
+        board,
+        QUAD,
+        on_update=updates.append,
+        occupancy_observer=observer,
+        require_matching_baseline=True,
+        baseline_minimum_confidence=0.65,
+        patch_size=CELL,
+        stable_pairs=2,
+    )
+    session.start()
+    baseline = _render(board)
+    source.push(baseline, 0)
+    source.push(baseline.copy(), 50_000_000)
+    source.push(baseline.copy(), 100_000_000)
+
+    _wait_until(lambda: any(update.status is LiveSyncStatus.CONTEXT_INVALID for update in updates))
+
+    assert all(update.status is not LiveSyncStatus.BASELINE_READY for update in updates)
     session.close()
 
 
@@ -430,6 +525,33 @@ def test_live_session_close_finishes_when_owned_source_close_raises() -> None:
 
     assert source.close_calls >= 1
     assert [update.status for update in updates].count(LiveSyncStatus.CLOSED) == 1
+
+
+def test_live_session_close_releases_full_frame_state() -> None:
+    board = parse_fen(START)
+    source = FakeFrameSource(hwnd=42)
+    updates = []
+    session = LiveSyncSession(
+        source,
+        board,
+        QUAD,
+        on_update=updates.append,
+        patch_size=CELL,
+        stable_pairs=2,
+    )
+    session.start()
+    baseline = _render(board)
+    source.push(baseline, 0)
+    source.push(baseline.copy(), 50_000_000)
+    source.push(baseline.copy(), 100_000_000)
+    _wait_until(lambda: any(update.status is LiveSyncStatus.BASELINE_READY for update in updates))
+
+    session.close()
+    session.close()
+
+    assert session._latest_frame is None
+    assert session._tracker is None
+    assert session._sampler is None
 
 
 def test_recovery_wins_over_a_frame_dequeued_before_the_processing_lock() -> None:

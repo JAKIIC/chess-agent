@@ -4,6 +4,7 @@ from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
+from math import isfinite
 from queue import Empty
 from threading import Condition, Lock, Thread, current_thread
 from time import perf_counter_ns
@@ -27,6 +28,7 @@ from xiangqi_agent.sync.tracker import StableMoveTracker, TrackingStatus, Tracki
 from xiangqi_agent.sync.transition_capture import TransitionCaptureEvidence
 from xiangqi_agent.vision.change_detection import FrameStabilityDetector
 from xiangqi_agent.vision.geometry import BoardGeometry, NormalizedQuad
+from xiangqi_agent.vision.occupancy import OccupancyObserver, compare_occupancy
 
 
 class LiveSyncStatus(StrEnum):
@@ -148,6 +150,9 @@ class LiveSyncSession:
         stable_pairs: int = 2,
         patch_size: int = 48,
         capture_transition_evidence: bool = False,
+        occupancy_observer: OccupancyObserver | None = None,
+        require_matching_baseline: bool = False,
+        baseline_minimum_confidence: float = 0.65,
     ) -> None:
         if stable_pairs <= 0:
             raise ValueError("stable_pairs must be positive")
@@ -155,6 +160,17 @@ class LiveSyncSession:
             raise TypeError("sync_mode must be a SyncMode")
         if not isinstance(capture_transition_evidence, bool):
             raise TypeError("capture_transition_evidence must be a boolean")
+        if not isinstance(require_matching_baseline, bool):
+            raise TypeError("require_matching_baseline must be a boolean")
+        if require_matching_baseline and occupancy_observer is None:
+            raise ValueError("matching baseline requires an occupancy observer")
+        if isinstance(baseline_minimum_confidence, bool) or not isinstance(
+            baseline_minimum_confidence,
+            (int, float),
+        ):
+            raise TypeError("baseline_minimum_confidence must be a number")
+        if not isfinite(baseline_minimum_confidence) or not 0.0 <= baseline_minimum_confidence <= 1.0:
+            raise ValueError("baseline_minimum_confidence must be between zero and one")
         self._source = source
         self._board = board
         self._quad = quad
@@ -165,6 +181,9 @@ class LiveSyncSession:
         self._stable_pairs = stable_pairs
         self._patch_size = patch_size
         self._capture_transition_evidence = capture_transition_evidence
+        self._occupancy_observer = occupancy_observer
+        self._require_matching_baseline = require_matching_baseline
+        self._baseline_minimum_confidence = float(baseline_minimum_confidence)
         self._events = _CoalescingEventQueue(max_frames=3)
         self._lock = Lock()
         self._processing_lock = Lock()
@@ -223,6 +242,7 @@ class LiveSyncSession:
             with self._lock:
                 if thread is None or not thread.is_alive():
                     self._finalized = True
+                    self._release_frame_state_locked()
             self._emit_closed("live sync session closed")
 
     def recover(
@@ -316,6 +336,23 @@ class LiveSyncSession:
                     change = detector.update(event.bgra)
                     if change is None or not change.stable:
                         continue
+                    if self._require_matching_baseline:
+                        occupancy_observer = self._occupancy_observer
+                        if occupancy_observer is None:
+                            raise RuntimeError("matching baseline lost its occupancy observer")
+                        comparison = compare_occupancy(
+                            occupancy_observer.observe(event.bgra, geometry),
+                            self.board,
+                            minimum_confidence=self._baseline_minimum_confidence,
+                        )
+                        if not comparison.accepted:
+                            self._emit(
+                                LiveSyncStatus.CONTEXT_INVALID,
+                                "target board is not visibly consistent with the confirmed position",
+                                frame_size=event.size,
+                                point_count=90,
+                            )
+                            continue
                     tracker = StableMoveTracker(
                         self.board,
                         geometry,
@@ -329,6 +366,7 @@ class LiveSyncSession:
                         required_stable_pairs=self._stable_pairs,
                         patch_size=self._patch_size,
                         capture_transition_evidence=self._capture_transition_evidence,
+                        occupancy_observer=self._occupancy_observer,
                     )
                     tracker.initialize(event.bgra)
                     sampler = AdaptiveBurstSampler(
@@ -559,7 +597,14 @@ class LiveSyncSession:
             pass
         with self._lock:
             self._finalized = True
+            self._release_frame_state_locked()
         self._emit_closed(message)
+
+    def _release_frame_state_locked(self) -> None:
+        self._latest_frame = None
+        self._tracker = None
+        self._sampler = None
+        self._pending_recovery = None
 
     def _is_closed(self) -> bool:
         with self._lock:

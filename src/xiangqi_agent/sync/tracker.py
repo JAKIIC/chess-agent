@@ -26,6 +26,7 @@ from xiangqi_agent.sync.transition_capture import (
 )
 from xiangqi_agent.vision.change_detection import analyze_frame_change
 from xiangqi_agent.vision.geometry import BoardGeometry, GeometryError
+from xiangqi_agent.vision.occupancy import OccupancyObserver
 from xiangqi_agent.vision.position_validation import validate_fixed_theme_position
 
 
@@ -70,6 +71,7 @@ class StableMoveTracker:
         local_threshold: float = 3.0,
         patch_size: int = 32,
         capture_transition_evidence: bool = False,
+        occupancy_observer: OccupancyObserver | None = None,
     ) -> None:
         if required_stable_pairs <= 0:
             raise ValueError("required_stable_pairs must be positive")
@@ -86,6 +88,7 @@ class StableMoveTracker:
         self._local_threshold = local_threshold
         self._patch_size = patch_size
         self._capture_transition_evidence = capture_transition_evidence
+        self._occupancy_observer = occupancy_observer
         self._mode = mode
         self._sequence_observer = sequence_observer
         if self._mode is SyncMode.HUMAN_VS_AI and self._sequence_observer is None:
@@ -122,8 +125,6 @@ class StableMoveTracker:
         *,
         capture_timestamp_ns: int | None = None,
     ) -> TrackingUpdate:
-        if self._confirmed_frame is None or self._previous_frame is None:
-            raise RuntimeError("tracker must be initialized with a confirmed frame")
         if capture_timestamp_ns is not None and (
             isinstance(capture_timestamp_ns, bool)
             or not isinstance(capture_timestamp_ns, int)
@@ -138,6 +139,8 @@ class StableMoveTracker:
             ):
                 self._blocked_status = TrackingStatus.MANUAL_RECOVERY_REQUIRED
             return TrackingUpdate(self._blocked_status, self._board)
+        if self._confirmed_frame is None or self._previous_frame is None:
+            raise RuntimeError("tracker must be initialized with a confirmed frame")
 
         current = _owned_frame(frame)
         change = analyze_frame_change(
@@ -346,10 +349,15 @@ class StableMoveTracker:
             self._geometry,
             observation.evidence.local_differences,
             decision_latency_ms=(completed_ns - latency_origin_ns) / 1_000_000,
+            occupancy_observer=self._occupancy_observer,
         )
 
     def invalidate_context(self) -> TrackingUpdate:
         self._blocked_status = TrackingStatus.CONTEXT_INVALID
+        self._confirmed_frame = None
+        self._previous_frame = None
+        self._motion_seen = False
+        self._stable_pairs = 0
         return TrackingUpdate(TrackingStatus.CONTEXT_INVALID, self._board)
 
     def rebind_frame_size(self, frame: NDArray[np.generic]) -> TrackingUpdate:
