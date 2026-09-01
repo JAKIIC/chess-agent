@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
+from hashlib import sha256
 from pathlib import Path
 
 import numpy as np
@@ -213,6 +214,19 @@ def test_stage_c_recorder_writes_only_declared_small_crops_and_manifest(
         "full_frame",
     ):
         assert forbidden not in lowered
+
+
+def test_v1_manifest_bytes_remain_backward_compatible(tmp_path: Path) -> None:
+    sample_dir = HumanAiStageCSampleRecorder(tmp_path, enabled=True).record(
+        _sample(),
+        _crops(),
+    )
+    manifest = (sample_dir / "manifest.json").read_bytes()
+
+    assert len(manifest) == 3209
+    assert sha256(manifest).hexdigest() == (
+        "aee5dd1f715a65646dbc39a3508854e9fd39a76e9acb66ae7efd2b67e4c41fff"
+    )
 
 
 def test_stage_c_recorder_rejects_mismatched_crops_before_retention(tmp_path: Path) -> None:

@@ -9,7 +9,7 @@ from enum import StrEnum
 from hashlib import sha256
 from math import isfinite
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 from uuid import uuid4
 
 import cv2
@@ -118,93 +118,164 @@ class HumanAiStageCSampleV1:
     schema_version: int = 1
 
     def __post_init__(self) -> None:
-        _validate_identifier(self.sample_id)
-        _validate_identifier(self.session_id)
-        _parse_utc(self.created_at_utc)
-        if not isinstance(self.confirmed_fen, str) or not self.confirmed_fen.strip():
-            raise ValueError("confirmed_fen must be non-empty")
-        _validate_position_id(self.confirmed_position_id)
-        if not isinstance(self.expected_outcome, StageCExpectedOutcome):
-            raise TypeError("expected_outcome must be a StageCExpectedOutcome")
-        if not isinstance(self.scenario, StageCScenario):
-            raise TypeError("scenario must be a StageCScenario")
-        _validate_move_tuple(self.ground_truth_moves_uci, maximum=3)
-        if self.expected_outcome is StageCExpectedOutcome.ACCEPT:
-            if len(self.ground_truth_moves_uci) != 2:
-                raise ValueError("accepted event must contain exactly two ground-truth moves")
-            if self.scenario is not StageCScenario.VALID_TWO_PLY:
-                raise ValueError("accepted event must use the valid_two_ply scenario")
-            if self.expected_final_position_id is None:
-                raise ValueError("accepted event must contain an expected final position")
-            _validate_position_id(self.expected_final_position_id)
-        elif self.expected_final_position_id is not None:
-            raise ValueError("rejection event must not claim an expected final position")
-        elif self.scenario is StageCScenario.VALID_TWO_PLY:
-            raise ValueError("rejection event must use a rejection scenario")
-
-        if not isinstance(self.observed_status, StageCObservedStatus):
-            raise TypeError("observed_status must be a StageCObservedStatus")
-        _validate_move_tuple(self.observed_moves_uci, maximum=2)
-        if self.observed_status is StageCObservedStatus.ACCEPTED:
-            if len(self.observed_moves_uci) != 2 or self.observed_final_position_id is None:
-                raise ValueError("accepted observation must expose two moves and a final position")
-            _validate_position_id(self.observed_final_position_id)
-            if self.rejection_reasons:
-                raise ValueError("accepted observation must not contain rejection reasons")
-        else:
-            if self.observed_moves_uci:
-                raise ValueError("rejected observation must not expose moves")
-            if self.observed_final_position_id != self.confirmed_position_id:
-                raise ValueError("rejected observation must keep the confirmed position")
-            if not self.rejection_reasons:
-                raise ValueError("rejected observation must contain a rejection reason")
-
-        if self.side_to_move not in ("w", "b"):
-            raise ValueError("side_to_move must be w or b")
-        if not isinstance(self.orientation, Orientation):
-            raise TypeError("orientation must be an Orientation")
-        _validate_points(self.changed_points, minimum=1)
-        if not isinstance(self.local_differences, tuple) or len(self.local_differences) != 90:
-            raise ValueError("local_differences must contain exactly 90 values")
-        if any(
-            not _is_number(value) or not isfinite(value) or value < 0
-            for value in self.local_differences
-        ):
-            raise ValueError("local differences must be finite non-negative values")
-        if not isinstance(self.candidates, tuple) or any(
-            not isinstance(candidate, StageCCandidateRecord) for candidate in self.candidates
-        ):
-            raise TypeError("candidates must be a tuple of StageCCandidateRecord")
-        if len(self.candidates) > 2:
-            raise ValueError("Stage C evidence keeps at most two candidates")
-        ranked = tuple(
-            sorted(
-                self.candidates,
-                key=lambda candidate: (-candidate.score, candidate.moves_uci),
-            )
-        )
-        if ranked != self.candidates:
-            raise ValueError("Stage C candidates must use deterministic ranked order")
-        if not isinstance(self.rejection_reasons, tuple) or any(
-            not isinstance(reason, str) or not reason.strip()
-            for reason in self.rejection_reasons
-        ):
-            raise TypeError("rejection_reasons must be a tuple of non-empty strings")
-        if len(set(self.rejection_reasons)) != len(self.rejection_reasons):
-            raise ValueError("rejection reasons must not contain duplicates")
-        if not isinstance(self.capture_context, CaptureContext):
-            raise TypeError("capture_context must be a CaptureContext")
-        for version in (self.feature_version, self.threshold_profile_version):
-            if not isinstance(version, str) or not version.strip():
-                raise ValueError("feature and threshold profile versions must be non-empty")
-        if (
-            not _is_number(self.decision_latency_ms)
-            or not isfinite(self.decision_latency_ms)
-            or self.decision_latency_ms < 0
-        ):
-            raise ValueError("decision_latency_ms must be finite and non-negative")
+        _validate_replay_fields(self)
         if self.schema_version != 1:
             raise ValueError("HumanAiStageCSampleV1 schema_version must be 1")
+
+
+class _StageCReplayFields(Protocol):
+    @property
+    def sample_id(self) -> str: ...
+
+    @property
+    def session_id(self) -> str: ...
+
+    @property
+    def created_at_utc(self) -> str: ...
+
+    @property
+    def confirmed_fen(self) -> str: ...
+
+    @property
+    def confirmed_position_id(self) -> str: ...
+
+    @property
+    def expected_outcome(self) -> StageCExpectedOutcome: ...
+
+    @property
+    def scenario(self) -> StageCScenario: ...
+
+    @property
+    def ground_truth_moves_uci(self) -> tuple[str, ...]: ...
+
+    @property
+    def expected_final_position_id(self) -> str | None: ...
+
+    @property
+    def observed_status(self) -> StageCObservedStatus: ...
+
+    @property
+    def observed_moves_uci(self) -> tuple[str, ...]: ...
+
+    @property
+    def observed_final_position_id(self) -> str | None: ...
+
+    @property
+    def side_to_move(self) -> Side: ...
+
+    @property
+    def orientation(self) -> Orientation: ...
+
+    @property
+    def changed_points(self) -> tuple[int, ...]: ...
+
+    @property
+    def local_differences(self) -> tuple[float, ...]: ...
+
+    @property
+    def candidates(self) -> tuple[StageCCandidateRecord, ...]: ...
+
+    @property
+    def rejection_reasons(self) -> tuple[str, ...]: ...
+
+    @property
+    def capture_context(self) -> CaptureContext: ...
+
+    @property
+    def feature_version(self) -> str: ...
+
+    @property
+    def threshold_profile_version(self) -> str: ...
+
+    @property
+    def decision_latency_ms(self) -> float: ...
+
+
+def _validate_replay_fields(sample: _StageCReplayFields) -> None:
+    _validate_identifier(sample.sample_id)
+    _validate_identifier(sample.session_id)
+    _parse_utc(sample.created_at_utc)
+    if not isinstance(sample.confirmed_fen, str) or not sample.confirmed_fen.strip():
+        raise ValueError("confirmed_fen must be non-empty")
+    _validate_position_id(sample.confirmed_position_id)
+    if not isinstance(sample.expected_outcome, StageCExpectedOutcome):
+        raise TypeError("expected_outcome must be a StageCExpectedOutcome")
+    if not isinstance(sample.scenario, StageCScenario):
+        raise TypeError("scenario must be a StageCScenario")
+    _validate_move_tuple(sample.ground_truth_moves_uci, maximum=3)
+    if sample.expected_outcome is StageCExpectedOutcome.ACCEPT:
+        if len(sample.ground_truth_moves_uci) != 2:
+            raise ValueError("accepted event must contain exactly two ground-truth moves")
+        if sample.scenario is not StageCScenario.VALID_TWO_PLY:
+            raise ValueError("accepted event must use the valid_two_ply scenario")
+        if sample.expected_final_position_id is None:
+            raise ValueError("accepted event must contain an expected final position")
+        _validate_position_id(sample.expected_final_position_id)
+    elif sample.expected_final_position_id is not None:
+        raise ValueError("rejection event must not claim an expected final position")
+    elif sample.scenario is StageCScenario.VALID_TWO_PLY:
+        raise ValueError("rejection event must use a rejection scenario")
+
+    if not isinstance(sample.observed_status, StageCObservedStatus):
+        raise TypeError("observed_status must be a StageCObservedStatus")
+    _validate_move_tuple(sample.observed_moves_uci, maximum=2)
+    if sample.observed_status is StageCObservedStatus.ACCEPTED:
+        if len(sample.observed_moves_uci) != 2 or sample.observed_final_position_id is None:
+            raise ValueError("accepted observation must expose two moves and a final position")
+        _validate_position_id(sample.observed_final_position_id)
+        if sample.rejection_reasons:
+            raise ValueError("accepted observation must not contain rejection reasons")
+    else:
+        if sample.observed_moves_uci:
+            raise ValueError("rejected observation must not expose moves")
+        if sample.observed_final_position_id != sample.confirmed_position_id:
+            raise ValueError("rejected observation must keep the confirmed position")
+        if not sample.rejection_reasons:
+            raise ValueError("rejected observation must contain a rejection reason")
+
+    if sample.side_to_move not in ("w", "b"):
+        raise ValueError("side_to_move must be w or b")
+    if not isinstance(sample.orientation, Orientation):
+        raise TypeError("orientation must be an Orientation")
+    _validate_points(sample.changed_points, minimum=1)
+    if not isinstance(sample.local_differences, tuple) or len(sample.local_differences) != 90:
+        raise ValueError("local_differences must contain exactly 90 values")
+    if any(
+        not _is_number(value) or not isfinite(value) or value < 0
+        for value in sample.local_differences
+    ):
+        raise ValueError("local differences must be finite non-negative values")
+    if not isinstance(sample.candidates, tuple) or any(
+        not isinstance(candidate, StageCCandidateRecord) for candidate in sample.candidates
+    ):
+        raise TypeError("candidates must be a tuple of StageCCandidateRecord")
+    if len(sample.candidates) > 2:
+        raise ValueError("Stage C evidence keeps at most two candidates")
+    ranked = tuple(
+        sorted(
+            sample.candidates,
+            key=lambda candidate: (-candidate.score, candidate.moves_uci),
+        )
+    )
+    if ranked != sample.candidates:
+        raise ValueError("Stage C candidates must use deterministic ranked order")
+    if not isinstance(sample.rejection_reasons, tuple) or any(
+        not isinstance(reason, str) or not reason.strip() for reason in sample.rejection_reasons
+    ):
+        raise TypeError("rejection_reasons must be a tuple of non-empty strings")
+    if len(set(sample.rejection_reasons)) != len(sample.rejection_reasons):
+        raise ValueError("rejection reasons must not contain duplicates")
+    if not isinstance(sample.capture_context, CaptureContext):
+        raise TypeError("capture_context must be a CaptureContext")
+    for version in (sample.feature_version, sample.threshold_profile_version):
+        if not isinstance(version, str) or not version.strip():
+            raise ValueError("feature and threshold profile versions must be non-empty")
+    if (
+        not _is_number(sample.decision_latency_ms)
+        or not isfinite(sample.decision_latency_ms)
+        or sample.decision_latency_ms < 0
+    ):
+        raise ValueError("decision_latency_ms must be finite and non-negative")
 
 
 class HumanAiStageCSampleRecorder:
