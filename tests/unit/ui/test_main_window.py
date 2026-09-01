@@ -6,6 +6,14 @@ import numpy as np
 import pytest
 from PySide6.QtCore import Qt
 
+from tests.unit.diagnostics.test_stage_c_promotion import _record
+from tests.unit.diagnostics.test_stage_c_quarantine import _event
+from tests.unit.ui.test_stage_c_review_panel import (
+    RecordingPromotionService,
+)
+from tests.unit.ui.test_stage_c_review_panel import (
+    _panel as review_panel,
+)
 from xiangqi_agent.capture.fake import FakeFrameSource
 from xiangqi_agent.capture.protocol import CaptureClosedError
 from xiangqi_agent.coach.client import DeepSeekClient
@@ -621,3 +629,67 @@ def test_disconnect_cancels_pending_recovery_and_reconnect_accepts_moves(qtbot: 
     second_source.push(moved.copy(), 260_000_000)
     qtbot.waitUntil(lambda: window.board_widget.board == after, timeout=2000)  # type: ignore[attr-defined]
     window.close()
+
+
+def test_main_window_review_card_never_starts_analysis_and_invalidates_on_reset(
+    qtbot: object,
+    tmp_path: Path,
+) -> None:
+    event_dir = _record(tmp_path, _event())
+    review = review_panel(tmp_path, RecordingPromotionService())
+    capture = CapturePanel(
+        catalog=OneWindowCatalog(WindowInfo(42, "天天象棋", "x", (216, 240)))
+    )
+    engine = ImmediateEngine()
+    window = MainWindow(
+        engine=engine,
+        coach_client=DeepSeekClient(api_key=None),
+        capture_panel=capture,
+        review_panel=review,
+    )
+    qtbot.addWidget(window)  # type: ignore[attr-defined]
+
+    capture.review_event_ready.emit(event_dir)
+
+    assert review.card is not None
+    assert window.tabs.tabText(window.tabs.currentIndex()) == "复核"
+    assert engine.calls == []
+
+    capture.session_reset.emit()
+
+    assert review.card is None
+    assert "捕获会话" in review.status_label.text()
+    window.close()
+
+
+def test_manual_position_change_and_close_invalidate_pending_review(
+    qtbot: object,
+    tmp_path: Path,
+) -> None:
+    event_dir = _record(tmp_path, _event())
+    review = review_panel(tmp_path, RecordingPromotionService())
+    capture = CapturePanel(
+        catalog=OneWindowCatalog(WindowInfo(42, "天天象棋", "x", (216, 240)))
+    )
+    window = MainWindow(
+        engine=ImmediateEngine(),
+        coach_client=DeepSeekClient(api_key=None),
+        capture_panel=capture,
+        review_panel=review,
+    )
+    qtbot.addWidget(window)  # type: ignore[attr-defined]
+    capture.review_event_ready.emit(event_dir)
+    board = parse_fen(START)
+    move = next(move for move in legal_moves(board) if move.uci == "h2e2")
+    after = apply_move(board, move)
+
+    window.fen_input.setText(after.fen)
+    window.analyse_button.click()
+
+    assert review.card is None
+    assert "局面" in review.status_label.text()
+
+    capture.review_event_ready.emit(event_dir)
+    assert review.card is not None
+    window.close()
+    assert review.card is None

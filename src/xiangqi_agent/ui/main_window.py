@@ -27,6 +27,8 @@ from xiangqi_agent.coach.client import DeepSeekClient
 from xiangqi_agent.coach.evidence import build_evidence
 from xiangqi_agent.coach.service import CoachExplainer, CoachService
 from xiangqi_agent.config import SecretStore
+from xiangqi_agent.diagnostics.stage_c_promotion import StageCPromotionService
+from xiangqi_agent.diagnostics.stage_c_review import StageCReviewService, StageCReviewStore
 from xiangqi_agent.domain.analysis import EngineAnalysis
 from xiangqi_agent.domain.board import BoardState, Move
 from xiangqi_agent.domain.coach import CoachEvidence, CoachExplanation
@@ -45,6 +47,7 @@ from xiangqi_agent.ui.capture_panel import CapturePanel, CaptureRecoveryStatus
 from xiangqi_agent.ui.coach_panel import CoachPanel
 from xiangqi_agent.ui.fonts import ensure_cjk_font
 from xiangqi_agent.ui.settings_dialog import DeepSeekSettingsDialog
+from xiangqi_agent.ui.stage_c_review_panel import StageCReviewPanel
 
 START_FEN = "rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w"
 
@@ -64,6 +67,7 @@ class MainWindow(QMainWindow):
         engine: AnalysisEngine | None = None,
         coach_client: CoachExplainer | None = None,
         capture_panel: CapturePanel | None = None,
+        review_panel: StageCReviewPanel | None = None,
         runtime_root: Path | None = None,
         quick_ms: int = 500,
         deep_ms: int = 3000,
@@ -90,12 +94,27 @@ class MainWindow(QMainWindow):
         self._bridge.coach_ready.connect(self._show_coach)
         self._bridge.coach_failed.connect(self._show_coach_error)
         self._service: AnalysisService | None = None
+        resolved_runtime_root = runtime_root or Path.cwd()
 
         self.board_widget = BoardWidget()
-        self.capture_panel = capture_panel or CapturePanel()
+        self.capture_panel = capture_panel or CapturePanel(
+            local_root=resolved_runtime_root / ".local"
+        )
+        self.review_panel = review_panel or StageCReviewPanel(
+            review_service=StageCReviewService(
+                StageCReviewStore(
+                    resolved_runtime_root / ".local" / "stage-c-reviews",
+                    enabled=True,
+                )
+            ),
+            promotion_service=StageCPromotionService(),
+            reviewed_root=resolved_runtime_root / ".local" / "stage-c-reviewed",
+        )
         self.capture_panel.set_board_provider(self._capture_board)
         self.capture_panel.sync_update.connect(self._on_sync_update)
         self.capture_panel.session_reset.connect(self._on_capture_reset)
+        self.capture_panel.review_event_ready.connect(self._load_review_event)
+        self.review_panel.review_completed.connect(self.capture_panel.finish_review)
         self.fen_input = QLineEdit(START_FEN)
         self.fen_input.setPlaceholderText("输入标准中国象棋 FEN")
         self.analyse_button = QPushButton("载入局面并分析")
@@ -131,7 +150,7 @@ class MainWindow(QMainWindow):
             on_ready=self._bridge.coach_ready.emit,
             on_error=self._bridge.coach_failed.emit,
         )
-        resolved_engine = engine or self._load_default_engine(runtime_root or Path.cwd())
+        resolved_engine = engine or self._load_default_engine(resolved_runtime_root)
         if resolved_engine is not None:
             self._service = AnalysisService(
                 resolved_engine,
@@ -182,6 +201,7 @@ class MainWindow(QMainWindow):
         coach_layout.addLayout(coach_header)
         coach_layout.addWidget(self.coach_panel, 1)
         self.tabs.addTab(coach_tab, "教练")
+        self.tabs.addTab(self.review_panel, "复核")
         right.addWidget(self.tabs, 1)
         root.addLayout(right, 7)
         self.setCentralWidget(panel)
@@ -230,6 +250,11 @@ class MainWindow(QMainWindow):
         except ValueError as exc:
             self.phase_label.setText(f"FEN 无效：{exc}")
             return
+        if (
+            self.review_panel.confirmed_position_id is not None
+            and self.review_panel.confirmed_position_id != board.position_id
+        ):
+            self.review_panel.invalidate("当前局面已经变化，旧复核卡已失效。")
         recovery = self.capture_panel.recover(board)
         if recovery.status is CaptureRecoveryStatus.FAILED:
             self._pending_manual_board = None
@@ -254,6 +279,11 @@ class MainWindow(QMainWindow):
         last_move: Move | None = None,
         submit_analysis: bool = True,
     ) -> None:
+        if (
+            self.review_panel.confirmed_position_id is not None
+            and self.review_panel.confirmed_position_id != board.position_id
+        ):
+            self.review_panel.invalidate("当前局面已经变化，旧复核卡已失效。")
         self._board = board
         self._latest_analysis = None
         self._analysis_generation = None
@@ -343,11 +373,24 @@ class MainWindow(QMainWindow):
         )
 
     def _on_capture_reset(self) -> None:
+        if self.review_panel.card is not None:
+            self.review_panel.invalidate("捕获会话已经变化，旧复核卡已失效。")
         if self._pending_manual_board is None:
             return
         self._pending_manual_board = None
         self._pending_recovery_id = None
         self.phase_label.setText("捕获会话已重置；原局面保持不变")
+
+    def _load_review_event(self, event_dir: object) -> None:
+        if not isinstance(event_dir, Path):
+            self.review_panel.invalidate("本地复核事件无效。")
+            return
+        try:
+            self.review_panel.load_event(event_dir)
+        except (OSError, RuntimeError, TypeError, ValueError):
+            self.review_panel.invalidate("本地复核证据无法安全读取。")
+            return
+        self.tabs.setCurrentWidget(self.review_panel)
 
     def _show_quick(self, analysis: EngineAnalysis) -> None:
         if not self._is_current(analysis):
@@ -426,6 +469,8 @@ class MainWindow(QMainWindow):
         self.results.resizeColumnToContents(4)
 
     def closeEvent(self, event: QCloseEvent) -> None:
+        if self.review_panel.card is not None:
+            self.review_panel.invalidate("学习助手已关闭，待复核卡已失效。")
         self.capture_panel.close_capture()
         self._coach_service.close()
         if self._service is not None:

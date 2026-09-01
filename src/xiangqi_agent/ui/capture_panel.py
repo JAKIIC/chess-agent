@@ -3,10 +3,13 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from enum import StrEnum
+from pathlib import Path
 from typing import Protocol
+from uuid import uuid4
 
 from PySide6.QtCore import QObject, Signal
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QHBoxLayout,
     QLabel,
@@ -23,6 +26,7 @@ from xiangqi_agent.capture.monitor import (
 )
 from xiangqi_agent.capture.protocol import FrameSource
 from xiangqi_agent.capture.visible_window_source import VisibleWindowCaptureSource
+from xiangqi_agent.diagnostics.stage_c_live_capture import StageCTerminalEventWriter
 from xiangqi_agent.domain.board import BoardState, Orientation
 from xiangqi_agent.platform.windows import WindowInfo, WindowsWindowCatalog
 from xiangqi_agent.sync.live_session import (
@@ -31,7 +35,12 @@ from xiangqi_agent.sync.live_session import (
     LiveSyncUpdate,
 )
 from xiangqi_agent.sync.mode import SyncMode
-from xiangqi_agent.vision.geometry import GeometryError, parse_normalized_quad
+from xiangqi_agent.vision.geometry import (
+    GeometryError,
+    NormalizedQuad,
+    parse_normalized_quad,
+)
+from xiangqi_agent.vision.occupancy import CircularOccupancyObserver, OccupancyObserver
 
 DEFAULT_QUAD = "0.315,0.132;0.678,0.132;0.678,0.862;0.315,0.862"
 
@@ -42,6 +51,21 @@ class WindowCatalog(Protocol):
 
 type SourceFactory = Callable[[WindowInfo], FrameSource]
 type BoardProvider = Callable[[], BoardState]
+type OccupancyObserverFactory = Callable[[], OccupancyObserver]
+
+
+class EvidenceWriter(Protocol):
+    def record(
+        self,
+        update: LiveSyncUpdate,
+        *,
+        board: BoardState,
+        quad: NormalizedQuad,
+        session_id: str,
+        event_id: str,
+        client_size: tuple[int, int],
+        generation_id: int,
+    ) -> Path: ...
 
 
 class _CaptureBridge(QObject):
@@ -73,6 +97,7 @@ class CapturePanel(QWidget):
 
     sync_update = Signal(object)
     session_reset = Signal()
+    review_event_ready = Signal(object)
 
     def __init__(
         self,
@@ -81,6 +106,11 @@ class CapturePanel(QWidget):
         source_factory: SourceFactory | None = None,
         board_provider: BoardProvider | None = None,
         patch_size: int = 48,
+        local_root: Path | None = None,
+        evidence_writer: EvidenceWriter | None = None,
+        occupancy_observer_factory: OccupancyObserverFactory | None = None,
+        session_id_factory: Callable[[], str] | None = None,
+        event_id_factory: Callable[[], str] | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -88,10 +118,27 @@ class CapturePanel(QWidget):
         self._source_factory = source_factory or _default_source_factory
         self._board_provider = board_provider
         self._patch_size = patch_size
+        resolved_local_root = local_root or Path.cwd() / ".local"
+        self._evidence_writer = evidence_writer or StageCTerminalEventWriter(
+            resolved_local_root
+        )
+        self._occupancy_observer_factory = (
+            occupancy_observer_factory or CircularOccupancyObserver
+        )
+        self._session_id_factory = session_id_factory or (lambda: uuid4().hex)
+        self._event_id_factory = event_id_factory or (lambda: uuid4().hex)
         self._windows: tuple[WindowInfo, ...] = ()
         self._monitor: CaptureMonitor | None = None
         self._session: LiveSyncSession | None = None
         self._generation = 0
+        self._evidence_enabled_for_session = False
+        self._evidence_board: BoardState | None = None
+        self._evidence_quad: NormalizedQuad | None = None
+        self._evidence_client_size: tuple[int, int] | None = None
+        self._evidence_session_id: str | None = None
+        self._pending_review_event: Path | None = None
+        self._pending_review_next_board: BoardState | None = None
+        self._evidence_out_of_sync = False
         self._bridge = _CaptureBridge(self)
         self._bridge.update.connect(self._show_update)
 
@@ -110,6 +157,8 @@ class CapturePanel(QWidget):
             "人机练习（可同步连续应手）",
             SyncMode.HUMAN_VS_AI.value,
         )
+        self.evidence_checkbox = QCheckBox("帮助改进识别（本地保存小裁片）")
+        self.evidence_checkbox.setChecked(False)
         self.status_label = QLabel("尚未选择天天象棋窗口")
         self.status_label.setWordWrap(True)
 
@@ -125,6 +174,7 @@ class CapturePanel(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addLayout(first_row)
         layout.addLayout(second_row)
+        layout.addWidget(self.evidence_checkbox)
         layout.addWidget(self.status_label)
 
         self.refresh_button.clicked.connect(self._refresh_windows)
@@ -137,6 +187,7 @@ class CapturePanel(QWidget):
         had_active_session = monitor is not None or session is not None
         self._monitor = None
         self._session = None
+        self._clear_evidence_session()
         if monitor is not None:
             monitor.close()
         if session is not None:
@@ -147,12 +198,28 @@ class CapturePanel(QWidget):
         self.quad_input.setEnabled(True)
         self.orientation_combo.setEnabled(True)
         self.mode_combo.setEnabled(True)
+        self.evidence_checkbox.setEnabled(True)
         self.connect_button.setEnabled(bool(self._windows))
         if had_active_session:
             self.session_reset.emit()
 
     def set_board_provider(self, provider: BoardProvider) -> None:
         self._board_provider = provider
+
+    def finish_review(self, event_id: str, status: str) -> None:
+        pending = self._pending_review_event
+        if pending is None or pending.name != event_id:
+            return
+        if self._evidence_out_of_sync:
+            self.close_capture()
+            self.status_label.setText("复核期间棋盘继续变化；请重新连接后再采集证据")
+            return
+        self._evidence_board = self._pending_review_next_board
+        self._pending_review_event = None
+        self._pending_review_next_board = None
+        self.status_label.setText(
+            "本地复核已完成，可继续监听" if status == "promoted" else "事件已丢弃，可继续监听"
+        )
 
     def recover(self, board: BoardState) -> CaptureRecoveryResult:
         session = self._session
@@ -218,9 +285,15 @@ class CapturePanel(QWidget):
             quad = parse_normalized_quad(self.quad_input.text().strip())
             orientation = Orientation(str(self.orientation_combo.currentData()))
             sync_mode = SyncMode(str(self.mode_combo.currentData()))
-            source = self._source_factory(self._windows[index])
         except (GeometryError, TypeError, ValueError) as exc:
             self.status_label.setText(f"四角标定无效：{exc}")
+            return
+        evidence_mode = self.evidence_checkbox.isChecked()
+        if evidence_mode and sync_mode is not SyncMode.HUMAN_VS_AI:
+            self.status_label.setText("本地证据模式只用于人机练习，请先切换同步模式")
+            return
+        if evidence_mode and self._board_provider is None:
+            self.status_label.setText("本地证据模式需要一个已确认棋盘局面")
             return
 
         self._generation += 1
@@ -230,6 +303,7 @@ class CapturePanel(QWidget):
             self._bridge.update.emit(_TaggedCaptureUpdate(generation, update))
 
         if self._board_provider is None:
+            source = self._source_factory(self._windows[index])
             self._monitor = CaptureMonitor(
                 source,
                 quad,
@@ -239,9 +313,13 @@ class CapturePanel(QWidget):
         else:
             try:
                 board = replace(self._board_provider(), orientation=orientation)
+                source = self._source_factory(self._windows[index])
             except (RuntimeError, TypeError, ValueError) as exc:
                 self.status_label.setText(f"当前局面无效：{exc}")
                 return
+            occupancy_observer = (
+                self._occupancy_observer_factory() if evidence_mode else None
+            )
             self._session = LiveSyncSession(
                 source,
                 board,
@@ -249,13 +327,23 @@ class CapturePanel(QWidget):
                 on_update=forward,
                 sync_mode=sync_mode,
                 patch_size=self._patch_size,
+                capture_transition_evidence=evidence_mode,
+                occupancy_observer=occupancy_observer,
+                require_matching_baseline=evidence_mode,
             )
+            if evidence_mode:
+                self._evidence_enabled_for_session = True
+                self._evidence_board = board
+                self._evidence_quad = quad
+                self._evidence_client_size = self._windows[index].client_size
+                self._evidence_session_id = self._session_id_factory()
         self.connect_button.setText("断开")
         self.window_combo.setEnabled(False)
         self.refresh_button.setEnabled(False)
         self.quad_input.setEnabled(False)
         self.orientation_combo.setEnabled(False)
         self.mode_combo.setEnabled(False)
+        self.evidence_checkbox.setEnabled(False)
         if self._session is not None:
             self._session.start()
         elif self._monitor is not None:
@@ -330,6 +418,57 @@ class CapturePanel(QWidget):
         else:
             self.status_label.setText(f"实时同步失败：{update.message}")
             self.close_capture()
+        self._record_review_event(update)
+
+    def _record_review_event(self, update: LiveSyncUpdate) -> None:
+        if (
+            not self._evidence_enabled_for_session
+            or update.status
+            not in (LiveSyncStatus.MOVE_ACCEPTED, LiveSyncStatus.PAUSED_AMBIGUOUS)
+        ):
+            return
+        pending = self._pending_review_event
+        if pending is not None:
+            next_board = self._pending_review_next_board
+            if next_board is not None and update.board.position_id != next_board.position_id:
+                self._evidence_out_of_sync = True
+            return
+        board = self._evidence_board
+        quad = self._evidence_quad
+        client_size = self._evidence_client_size
+        session_id = self._evidence_session_id
+        if board is None or quad is None or client_size is None or session_id is None:
+            self.status_label.setText("本地证据上下文已失效；本次事件未保存")
+            return
+        event_id = self._event_id_factory()
+        try:
+            event_dir = self._evidence_writer.record(
+                update,
+                board=board,
+                quad=quad,
+                session_id=session_id,
+                event_id=event_id,
+                client_size=client_size,
+                generation_id=self._generation,
+            )
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            self._evidence_board = update.board
+            self.status_label.setText(f"本地证据未保存：{exc}")
+            return
+        self._pending_review_event = event_dir
+        self._pending_review_next_board = update.board
+        self.status_label.setText("终局事件已隔离保存；请先完成本地复核")
+        self.review_event_ready.emit(event_dir)
+
+    def _clear_evidence_session(self) -> None:
+        self._evidence_enabled_for_session = False
+        self._evidence_board = None
+        self._evidence_quad = None
+        self._evidence_client_size = None
+        self._evidence_session_id = None
+        self._pending_review_event = None
+        self._pending_review_next_board = None
+        self._evidence_out_of_sync = False
 
 
 def _default_source_factory(window: WindowInfo) -> FrameSource:
