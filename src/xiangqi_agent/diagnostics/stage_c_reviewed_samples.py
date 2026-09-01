@@ -76,6 +76,56 @@ _CANDIDATE_FIELDS = {
     "score",
     "final_position_id",
 }
+_SOURCE_PROVENANCE_FIELDS = {
+    "event_id",
+    "session_id",
+    "created_at_utc",
+    "confirmed_fen",
+    "confirmed_position_id",
+    "observed_status",
+    "observed_moves_uci",
+    "observed_final_position_id",
+    "side_to_move",
+    "orientation",
+    "changed_points",
+    "local_differences",
+    "candidates",
+    "rejection_reasons",
+    "capture_context",
+    "feature_version",
+    "threshold_profile_version",
+    "decision_latency_ms",
+    "before_occupancy",
+    "after_occupancy",
+    "schema_version",
+    "crop_hashes",
+}
+_REVIEW_PROVENANCE_FIELDS = {
+    "review_id",
+    "event_id",
+    "session_id",
+    "created_at_utc",
+    "event_manifest_sha256",
+    "label_kind",
+    "moves_uci",
+    "expected_final_position_id",
+    "scenario",
+    "review_outcome",
+    "supersedes_review_id",
+    "reviewer_kind",
+    "ui_version",
+    "rules_version",
+    "schema_version",
+}
+_CAPTURE_CONTEXT_FIELDS = {
+    "wgc_size",
+    "client_size",
+    "dpi_scale",
+    "geometry_revision",
+    "theme_fingerprint",
+    "generation_id",
+}
+_OCCUPANCY_FIELDS = {"occupied", "confidences", "algorithm_version"}
 
 
 class ReviewedStageCSampleIntegrityError(ValueError):
@@ -219,6 +269,7 @@ class ReviewedStageCSampleLoader:
             raise ReviewedStageCSampleIntegrityError(
                 "reviewed crop hashes do not match declared points"
             )
+        _validate_provenance(metadata, source_bytes, review_bytes, crop_hashes)
         encoded: dict[str, bytes] = {}
         for filename in crop_files:
             contents = (sample_dir / filename).read_bytes()
@@ -435,6 +486,133 @@ def _validate_rule_projection(sample: ReviewedStageCSampleV2) -> None:
         observed = _project(board, sample.observed_moves_uci)
         if observed is None or observed.position_id != sample.observed_final_position_id:
             raise ReviewedStageCSampleIntegrityError("observed final position is not rule-grounded")
+
+
+def _validate_provenance(
+    sample: ReviewedStageCSampleV2,
+    source_bytes: bytes,
+    review_bytes: bytes,
+    crop_hashes: dict[str, str],
+) -> None:
+    try:
+        source_value = json.loads(source_bytes.decode("utf-8"))
+        review_value = json.loads(review_bytes.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise ReviewedStageCSampleIntegrityError(
+            "reviewed provenance sidecars must be valid UTF-8 JSON"
+        ) from exc
+    if not isinstance(source_value, dict) or not isinstance(review_value, dict):
+        raise ReviewedStageCSampleIntegrityError(
+            "reviewed provenance sidecars must contain objects"
+        )
+    source = cast(dict[str, Any], source_value)
+    review = cast(dict[str, Any], review_value)
+    try:
+        _require_fields(source, _SOURCE_PROVENANCE_FIELDS, "source provenance")
+        _require_fields(review, _REVIEW_PROVENANCE_FIELDS, "review provenance")
+        candidates_value = source["candidates"]
+        if not isinstance(candidates_value, list):
+            raise TypeError("source candidates must be a list")
+        source_candidates = tuple(
+            _candidate_from_payload(_mapping(value, "source candidate"))
+            for value in candidates_value
+        )
+        context_payload = _mapping(source["capture_context"], "source capture context")
+        _require_fields(
+            context_payload,
+            _CAPTURE_CONTEXT_FIELDS,
+            "source capture context",
+        )
+        source_context = CaptureContext(
+            wgc_size=_size(context_payload["wgc_size"]),
+            client_size=_size(context_payload["client_size"]),
+            dpi_scale=_float(context_payload["dpi_scale"]),
+            geometry_revision=_string(context_payload["geometry_revision"]),
+            theme_fingerprint=_string(context_payload["theme_fingerprint"]),
+            generation_id=_integer(context_payload["generation_id"]),
+        )
+        before_version = _occupancy_version(source["before_occupancy"])
+        after_version = _occupancy_version(source["after_occupancy"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ReviewedStageCSampleIntegrityError(
+            "reviewed provenance fields are invalid"
+        ) from exc
+    source_matches = (
+        source.get("event_id") == sample.sample_id
+        and source.get("session_id") == sample.session_id
+        and source.get("created_at_utc") == sample.created_at_utc
+        and source.get("confirmed_fen") == sample.confirmed_fen
+        and source.get("confirmed_position_id") == sample.confirmed_position_id
+        and source.get("observed_status") == sample.observed_status.value
+        and source.get("observed_moves_uci") == list(sample.observed_moves_uci)
+        and source.get("observed_final_position_id")
+        == sample.observed_final_position_id
+        and source.get("side_to_move") == sample.side_to_move
+        and source.get("orientation") == sample.orientation.value
+        and source.get("changed_points") == list(sample.changed_points)
+        and source.get("local_differences") == list(sample.local_differences)
+        and source.get("rejection_reasons") == list(sample.rejection_reasons)
+        and source.get("feature_version") == sample.feature_version
+        and source.get("threshold_profile_version")
+        == sample.threshold_profile_version
+        and source.get("decision_latency_ms") == sample.decision_latency_ms
+        and source.get("crop_hashes") == crop_hashes
+        and source.get("schema_version") == 1
+        and source_candidates == sample.candidates
+        and source_context == sample.capture_context
+        and before_version == sample.occupancy_verifier_version
+        and after_version == sample.occupancy_verifier_version
+    )
+    if not source_matches:
+        raise ReviewedStageCSampleIntegrityError(
+            "source event provenance does not match reviewed metadata"
+        )
+
+    accepted = sample.expected_outcome is StageCExpectedOutcome.ACCEPT
+    expected_label = "valid_two_ply" if accepted else "expected_rejection"
+    expected_scenario = None if accepted else sample.scenario.value
+    review_matches = (
+        review.get("event_id") == sample.sample_id
+        and review.get("session_id") == sample.session_id
+        and review.get("event_manifest_sha256")
+        == sample.source_event_manifest_sha256
+        and review.get("label_kind") == expected_label
+        and review.get("moves_uci") == list(sample.ground_truth_moves_uci)
+        and review.get("expected_final_position_id")
+        == sample.expected_final_position_id
+        and review.get("scenario") == expected_scenario
+        and review.get("review_outcome") == sample.review_outcome.value
+        and review.get("reviewer_kind") == "local_user"
+        and review.get("ui_version") == "stage-c-review-v1"
+        and review.get("rules_version") == "xiangqi-rules-v1"
+        and review.get("schema_version") == 1
+    )
+    if not review_matches:
+        raise ReviewedStageCSampleIntegrityError(
+            "local review provenance does not match reviewed metadata"
+        )
+
+
+def _occupancy_version(value: object) -> str:
+    payload = _mapping(value, "occupancy provenance")
+    _require_fields(payload, _OCCUPANCY_FIELDS, "occupancy provenance")
+    occupied = payload["occupied"]
+    confidences = payload["confidences"]
+    if (
+        not isinstance(occupied, list)
+        or len(occupied) != 90
+        or any(not isinstance(item, bool) for item in occupied)
+    ):
+        raise ValueError("occupancy provenance must contain 90 booleans")
+    if not isinstance(confidences, list) or len(confidences) != 90:
+        raise ValueError("occupancy provenance must contain 90 confidences")
+    parsed_confidences = tuple(_float(item) for item in confidences)
+    if any(value < 0.0 or value > 1.0 for value in parsed_confidences):
+        raise ValueError("occupancy provenance confidence is outside [0, 1]")
+    version = _string(payload["algorithm_version"])
+    if not version.strip():
+        raise ValueError("occupancy provenance algorithm version is empty")
+    return version
 
 
 def _project(board: BoardState, moves_uci: tuple[str, ...]) -> BoardState | None:

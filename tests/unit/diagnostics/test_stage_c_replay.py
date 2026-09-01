@@ -16,11 +16,15 @@ from tests.unit.diagnostics.test_stage_c_samples import (
 )
 from xiangqi_agent.diagnostics.stage_c_replay import (
     HumanAiStageCReplayer,
+    HumanAiStageCSampleLoader,
     StageCSampleIntegrityError,
 )
+from xiangqi_agent.diagnostics.stage_c_reviewed_samples import ReviewedStageCSampleV2
 from xiangqi_agent.diagnostics.stage_c_samples import (
     HumanAiStageCSampleRecorder,
+    HumanAiStageCSampleV1,
     StageCObservedStatus,
+    StageCScenario,
 )
 from xiangqi_agent.sync.sequence_gate import (
     SequenceDecisionGate,
@@ -185,3 +189,112 @@ def test_wrong_accepted_chain_is_counted_as_a_false_accept(tmp_path: Path) -> No
     assert result.false_accept
     assert not result.correct_reject
     assert result.replayed_final_position_id != START_ID
+
+
+def test_loader_and_replayer_accept_equivalent_v1_and_reviewed_v2(
+    tmp_path: Path,
+) -> None:
+    from tests.unit.diagnostics.test_stage_c_promotion import (
+        _record as record_event,
+    )
+    from tests.unit.diagnostics.test_stage_c_promotion import (
+        _review_valid,
+        _reviewed_root,
+    )
+    from tests.unit.diagnostics.test_stage_c_quarantine import _event
+    from xiangqi_agent.diagnostics.stage_c_promotion import StageCPromotionService
+
+    v1 = _record(tmp_path / "legacy")
+    event_dir = record_event(tmp_path / "reviewed", _event())
+    review_path = _review_valid(tmp_path / "reviewed", event_dir)
+    v2 = StageCPromotionService().promote(
+        event_dir,
+        review_path,
+        _reviewed_root(tmp_path / "reviewed"),
+    )
+
+    legacy_loaded = HumanAiStageCSampleLoader().load(v1)
+    reviewed_loaded = HumanAiStageCSampleLoader().load(v2)
+    legacy_result = _replayer().replay(v1)
+    reviewed_result = _replayer().replay(v2)
+
+    assert isinstance(legacy_loaded.metadata, HumanAiStageCSampleV1)
+    assert isinstance(reviewed_loaded.metadata, ReviewedStageCSampleV2)
+    assert (
+        legacy_result.without_runtime_and_identity()
+        == reviewed_result.without_runtime_and_identity()
+    )
+    assert reviewed_result.review_outcome == "candidate_confirmed"
+    assert legacy_result.review_outcome is None
+
+
+@pytest.mark.parametrize(
+    "filename",
+    ("source-event-manifest.json", "review-manifest.json"),
+)
+def test_v2_provenance_sidecar_mutation_fails_before_replay(
+    tmp_path: Path,
+    filename: str,
+) -> None:
+    from tests.unit.diagnostics.test_stage_c_promotion import (
+        _record as record_event,
+    )
+    from tests.unit.diagnostics.test_stage_c_promotion import (
+        _review_valid,
+        _reviewed_root,
+    )
+    from tests.unit.diagnostics.test_stage_c_quarantine import _event
+    from xiangqi_agent.diagnostics.stage_c_promotion import StageCPromotionService
+
+    event_dir = record_event(tmp_path, _event())
+    review_path = _review_valid(tmp_path, event_dir)
+    sample_dir = StageCPromotionService().promote(
+        event_dir,
+        review_path,
+        _reviewed_root(tmp_path),
+    )
+    (sample_dir / filename).write_bytes((sample_dir / filename).read_bytes() + b" ")
+
+    with pytest.raises(StageCSampleIntegrityError, match="provenance"):
+        _replayer().replay(sample_dir)
+
+
+def test_loader_rejects_unknown_schema_version(tmp_path: Path) -> None:
+    path = _record(tmp_path)
+    _rewrite_manifest(path, schema_version=99)
+
+    with pytest.raises(StageCSampleIntegrityError, match="schema version"):
+        HumanAiStageCSampleLoader().load(path)
+
+
+def test_reviewed_resize_terminal_reason_is_consistent_with_safe_replay(
+    tmp_path: Path,
+) -> None:
+    from tests.unit.diagnostics.test_stage_c_promotion import (
+        _record as record_event,
+    )
+    from tests.unit.diagnostics.test_stage_c_promotion import (
+        _rejection_event,
+        _review_rejection,
+        _reviewed_root,
+    )
+    from xiangqi_agent.diagnostics.stage_c_promotion import StageCPromotionService
+
+    event, moves = _rejection_event(StageCScenario.RESIZE)
+    event_dir = record_event(tmp_path, event)
+    review_path = _review_rejection(
+        tmp_path,
+        event_dir,
+        StageCScenario.RESIZE,
+        moves,
+    )
+    sample_dir = StageCPromotionService().promote(
+        event_dir,
+        review_path,
+        _reviewed_root(tmp_path),
+    )
+
+    result = _replayer().replay(sample_dir)
+
+    assert result.correct_reject
+    assert result.recorded_observation_matches_replay

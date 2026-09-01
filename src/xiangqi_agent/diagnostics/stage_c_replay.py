@@ -10,6 +10,14 @@ import cv2
 import numpy as np
 
 from xiangqi_agent.capture.context import CaptureContext
+from xiangqi_agent.diagnostics.stage_c_review import (
+    StageCReviewOutcome,
+)
+from xiangqi_agent.diagnostics.stage_c_reviewed_samples import (
+    ReviewedStageCSampleIntegrityError,
+    ReviewedStageCSampleLoader,
+    ReviewedStageCSampleV2,
+)
 from xiangqi_agent.diagnostics.stage_c_samples import (
     HumanAiStageCSampleV1,
     StageCCandidateRecord,
@@ -25,14 +33,21 @@ from xiangqi_agent.sync.committer import RuleStateCommitter, StateCommitter
 from xiangqi_agent.sync.evidence import SequenceCandidateEvidence
 from xiangqi_agent.sync.sequence_gate import SequenceDecisionGate
 
+_CAPTURE_TERMINAL_REASONS = frozenset(
+    {"frame_size_changed", "capture_context_invalid", "target_window_closed"}
+)
+
 
 class StageCSampleIntegrityError(ValueError):
     """A frozen Stage C sample is incomplete, changed, or contradictory."""
 
 
+type StageCSampleMetadata = HumanAiStageCSampleV1 | ReviewedStageCSampleV2
+
+
 @dataclass(frozen=True, slots=True)
 class LoadedHumanAiStageCSample:
-    metadata: HumanAiStageCSampleV1
+    metadata: StageCSampleMetadata
     crops: tuple[TransitionPointCrops, ...]
     directory: Path
 
@@ -57,6 +72,8 @@ class HumanAiStageCReplayResult:
     feature_version: str
     threshold_profile_version: str
     runtime_ns: int
+    review_outcome: StageCReviewOutcome | None = None
+    label_source: str | None = None
 
     def without_runtime_and_identity(self) -> tuple[object, ...]:
         return (
@@ -87,6 +104,27 @@ class HumanAiStageCSampleLoader:
 
         manifest_path = sample_dir / "manifest.json"
         payload = _read_manifest(manifest_path)
+        schema_version = payload.get("schema_version")
+        if isinstance(schema_version, bool) or not isinstance(schema_version, int):
+            raise StageCSampleIntegrityError(
+                "Stage C manifest schema version must be an integer"
+            )
+        if schema_version == 2:
+            try:
+                reviewed = ReviewedStageCSampleLoader().load(sample_dir)
+            except ReviewedStageCSampleIntegrityError as exc:
+                raise StageCSampleIntegrityError(
+                    "reviewed V2 provenance or sample integrity failed"
+                ) from exc
+            return LoadedHumanAiStageCSample(
+                reviewed.metadata,
+                reviewed.crops,
+                reviewed.directory,
+            )
+        if schema_version != 1:
+            raise StageCSampleIntegrityError(
+                "Stage C manifest uses an unknown schema version"
+            )
         metadata = _metadata_from_payload(payload)
         expected_crop_files = tuple(
             filename
@@ -243,6 +281,16 @@ class HumanAiStageCReplayer:
             feature_version=sample.feature_version,
             threshold_profile_version=sample.threshold_profile_version,
             runtime_ns=perf_counter_ns() - started_ns,
+            review_outcome=(
+                sample.review_outcome
+                if isinstance(sample, ReviewedStageCSampleV2)
+                else None
+            ),
+            label_source=(
+                sample.label_source
+                if isinstance(sample, ReviewedStageCSampleV2)
+                else None
+            ),
         )
 
 
@@ -278,7 +326,7 @@ def _candidate_from_record(
 
 
 def _recorded_observation_matches(
-    sample: HumanAiStageCSampleV1,
+    sample: StageCSampleMetadata,
     *,
     accepted: bool,
     replayed_moves: tuple[str, ...],
@@ -292,15 +340,24 @@ def _recorded_observation_matches(
             and sample.observed_final_position_id == replayed_final_id
             and not sample.rejection_reasons
         )
+    reasons_match = sample.rejection_reasons == rejection_reasons
+    # Capture-layer terminal reasons cannot be reproduced by SequenceDecisionGate.
+    # Reviewed V2 provenance authenticates them separately from the replay decision.
+    if (
+        isinstance(sample, ReviewedStageCSampleV2)
+        and sample.scenario is StageCScenario.RESIZE
+        and bool(set(sample.rejection_reasons) & _CAPTURE_TERMINAL_REASONS)
+    ):
+        reasons_match = True
     return (
         sample.observed_status is StageCObservedStatus.REJECTED
         and not sample.observed_moves_uci
         and sample.observed_final_position_id == sample.confirmed_position_id
-        and sample.rejection_reasons == rejection_reasons
+        and reasons_match
     )
 
 
-def _board_from_metadata(sample: HumanAiStageCSampleV1) -> BoardState:
+def _board_from_metadata(sample: StageCSampleMetadata) -> BoardState:
     board = parse_fen(sample.confirmed_fen)
     if board.side_to_move != sample.side_to_move:
         raise StageCSampleIntegrityError("confirmed FEN side does not match sample side")

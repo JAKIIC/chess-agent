@@ -7,15 +7,14 @@ import pytest
 
 from scripts.evaluate_human_ai_stage_c import main as evaluate_main
 from scripts.freeze_human_ai_stage_c import main as freeze_main
-from tests.unit.diagnostics.test_stage_c_samples import (
-    _crops,
-    _rejected_sample,
-    _sample,
+from tests.unit.diagnostics.test_stage_c_promotion import _reviewed_root
+from tests.unit.scripts.test_freeze_human_ai_stage_c import (
+    _record as _record_reviewed_valid,
 )
-from xiangqi_agent.diagnostics.stage_c_samples import (
-    HumanAiStageCSampleRecorder,
-    StageCScenario,
+from tests.unit.scripts.test_freeze_human_ai_stage_c import (
+    _record_rejection as _record_reviewed_rejection,
 )
+from xiangqi_agent.diagnostics.stage_c_samples import StageCScenario
 
 REJECTION_SCENARIOS = (
     StageCScenario.MULTIPLE_CANDIDATES,
@@ -28,20 +27,20 @@ REJECTION_SCENARIOS = (
 
 
 def _record_valid(root: Path, index: int) -> Path:
-    sample = _sample(
+    return _record_reviewed_valid(
+        root,
         sample_id=f"valid-{index:03d}",
         session_id=f"valid-session-{index:03d}",
     )
-    return HumanAiStageCSampleRecorder(root, enabled=True).record(sample, _crops())
 
 
 def _record_rejection(root: Path, index: int) -> Path:
-    sample = _rejected_sample(
+    return _record_reviewed_rejection(
+        root,
         sample_id=f"reject-{index:03d}",
         session_id=f"reject-session-{index:03d}",
         scenario=REJECTION_SCENARIOS[index % len(REJECTION_SCENARIOS)],
     )
-    return HumanAiStageCSampleRecorder(root, enabled=True).record(sample, _crops((64,)))
 
 
 def _freeze(root: Path) -> Path:
@@ -53,7 +52,7 @@ def test_metric_failure_writes_auditable_privacy_safe_report_and_returns_one(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    root = tmp_path / "samples"
+    root = _reviewed_root(tmp_path)
     _record_valid(root, 0)
     manifest = _freeze(root)
     capsys.readouterr()
@@ -76,7 +75,7 @@ def test_metric_failure_writes_auditable_privacy_safe_report_and_returns_one(
 def test_changed_sample_manifest_is_an_integrity_error_and_returns_two(
     tmp_path: Path,
 ) -> None:
-    root = tmp_path / "samples"
+    root = _reviewed_root(tmp_path)
     sample_dir = _record_valid(root, 0)
     manifest = _freeze(root)
     sample_manifest = sample_dir / "manifest.json"
@@ -90,7 +89,7 @@ def test_changed_sample_manifest_is_an_integrity_error_and_returns_two(
 
 
 def test_frozen_parent_traversal_path_is_an_integrity_error(tmp_path: Path) -> None:
-    root = tmp_path / "samples"
+    root = _reviewed_root(tmp_path)
     _record_valid(root, 0)
     manifest = _freeze(root)
     payload = json.loads(manifest.read_text("utf-8"))
@@ -105,7 +104,7 @@ def test_frozen_parent_traversal_path_is_an_integrity_error(tmp_path: Path) -> N
 
 
 def test_frozen_duplicate_sample_path_is_an_integrity_error(tmp_path: Path) -> None:
-    root = tmp_path / "samples"
+    root = _reviewed_root(tmp_path)
     _record_valid(root, 0)
     _record_valid(root, 1)
     manifest = _freeze(root)
@@ -121,7 +120,7 @@ def test_frozen_duplicate_sample_path_is_an_integrity_error(tmp_path: Path) -> N
 
 
 def test_evaluator_never_overwrites_the_frozen_manifest(tmp_path: Path) -> None:
-    root = tmp_path / "samples"
+    root = _reviewed_root(tmp_path)
     _record_valid(root, 0)
     manifest = _freeze(root)
     original = manifest.read_bytes()
@@ -133,7 +132,7 @@ def test_evaluator_never_overwrites_the_frozen_manifest(tmp_path: Path) -> None:
 
 
 def test_complete_real_frozen_dataset_passes_and_returns_zero(tmp_path: Path) -> None:
-    root = tmp_path / "samples"
+    root = _reviewed_root(tmp_path)
     for index in range(30):
         _record_valid(root, index)
         _record_rejection(root, index)

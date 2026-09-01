@@ -15,6 +15,12 @@ from xiangqi_agent.diagnostics.stage_c_replay import (
     HumanAiStageCSampleLoader,
     StageCSampleIntegrityError,
 )
+from xiangqi_agent.diagnostics.stage_c_review import StageCReviewOutcome
+from xiangqi_agent.diagnostics.stage_c_reviewed_samples import (
+    ReviewedStageCSampleIntegrityError,
+    ReviewedStageCSampleLoader,
+    ReviewedStageCSampleV2,
+)
 from xiangqi_agent.diagnostics.stage_c_samples import (
     StageCExpectedOutcome,
     StageCScenario,
@@ -127,6 +133,7 @@ class HumanAiStageCMetrics:
     rejection_samples: int
     distinct_valid_sessions: int
     scenario_counts: tuple[tuple[str, int], ...]
+    review_outcome_counts: tuple[tuple[str, int], ...]
     accepted_samples: int
     correct_accepts: int
     false_accepts: int
@@ -146,6 +153,7 @@ class HumanAiStageCMetrics:
             "rejection_samples": self.rejection_samples,
             "distinct_valid_sessions": self.distinct_valid_sessions,
             "scenario_counts": dict(self.scenario_counts),
+            "review_outcome_counts": dict(self.review_outcome_counts),
             "accepted_samples": self.accepted_samples,
             "correct_accepts": self.correct_accepts,
             "false_accepts": self.false_accepts,
@@ -324,6 +332,139 @@ def freeze_human_ai_stage_c(
     return output_path
 
 
+def freeze_reviewed_human_ai_stage_c(
+    reviewed_root: Path,
+    output_name: str,
+    *,
+    feature_version: str = DEFAULT_STAGE_C_FEATURE_VERSION,
+    threshold_profile: SequenceThresholdProfile = DEFAULT_STAGE_C_THRESHOLD_PROFILE,
+    created_at_utc: str | None = None,
+) -> Path:
+    if not isinstance(reviewed_root, Path):
+        raise TypeError("reviewed_root must be a Path")
+    if (
+        reviewed_root.name != "stage-c-reviewed"
+        or reviewed_root.is_symlink()
+        or not reviewed_root.is_dir()
+    ):
+        raise StageCGateIntegrityError(
+            "reviewed-only freeze requires a real stage-c-reviewed root"
+        )
+    if not isinstance(output_name, str):
+        raise TypeError("output_name must be a string")
+    _validate_output_name(output_name)
+    if not isinstance(feature_version, str) or not feature_version.strip():
+        raise StageCGateIntegrityError("feature version must be non-empty")
+    if not isinstance(threshold_profile, SequenceThresholdProfile):
+        raise TypeError("threshold_profile must be a SequenceThresholdProfile")
+    output_path = reviewed_root / output_name
+    if output_path.exists() or output_path.is_symlink():
+        raise StageCGateIntegrityError("frozen manifest output already exists")
+
+    root = reviewed_root.resolve()
+    manifest_paths = tuple(sorted(reviewed_root.rglob("manifest.json")))
+    if not manifest_paths:
+        raise StageCGateIntegrityError("stage-c-reviewed contains no V2 samples")
+    for path in manifest_paths:
+        try:
+            relative = path.resolve().relative_to(root)
+        except ValueError as exc:
+            raise StageCGateIntegrityError(
+                "reviewed manifest path escapes the reviewed root"
+            ) from exc
+        if len(relative.parts) != 3 or relative.name != "manifest.json":
+            raise StageCGateIntegrityError(
+                "reviewed manifest has an unknown placement"
+            )
+    root_entries = tuple(reviewed_root.iterdir())
+    if any(path.is_symlink() or not path.is_dir() for path in root_entries):
+        raise StageCGateIntegrityError(
+            "stage-c-reviewed root has an unknown layout entry"
+        )
+    for session_dir in root_entries:
+        sample_dirs = tuple(session_dir.iterdir())
+        if not sample_dirs or any(
+            path.is_symlink() or not path.is_dir() for path in sample_dirs
+        ):
+            raise StageCGateIntegrityError(
+                "stage-c-reviewed root has an unknown layout entry"
+            )
+        if any(
+            (sample_dir / "manifest.json").is_symlink()
+            or not (sample_dir / "manifest.json").is_file()
+            for sample_dir in sample_dirs
+        ):
+            raise StageCGateIntegrityError(
+                "stage-c-reviewed root has an unknown layout entry"
+            )
+
+    loader = ReviewedStageCSampleLoader()
+    replayer = HumanAiStageCReplayer(
+        SequenceDecisionGate(threshold_profile),
+        feature_version=feature_version,
+    )
+    entries: list[FrozenStageCSampleV1] = []
+    for manifest_path in manifest_paths:
+        sample_dir = manifest_path.parent
+        try:
+            loaded = loader.load(sample_dir)
+            replayed = replayer.replay(sample_dir)
+        except (ReviewedStageCSampleIntegrityError, StageCSampleIntegrityError) as exc:
+            raise StageCGateIntegrityError(
+                "reviewed V2 provenance or deterministic replay failed before freeze"
+            ) from exc
+        metadata = loaded.metadata
+        if not isinstance(metadata, ReviewedStageCSampleV2):
+            raise StageCGateIntegrityError("reviewed-only freeze accepts only V2 samples")
+        relative = sample_dir.resolve().relative_to(root)
+        if relative.parts != (metadata.session_id, metadata.sample_id):
+            raise StageCGateIntegrityError(
+                "reviewed V2 directory does not match its anonymous ids"
+            )
+        if replayed.sample_id != metadata.sample_id:
+            raise StageCGateIntegrityError("reviewed V2 replay changed its sample id")
+        if metadata.feature_version != feature_version:
+            raise StageCGateIntegrityError(
+                "reviewed V2 samples mix or differ from the frozen feature version"
+            )
+        if metadata.threshold_profile_version != threshold_profile.profile_version:
+            raise StageCGateIntegrityError(
+                "reviewed V2 samples mix or differ from the frozen threshold profile"
+            )
+        relative_path = PurePosixPath(*relative.parts).as_posix()
+        entries.append(
+            FrozenStageCSampleV1(
+                metadata.sample_id,
+                relative_path,
+                sha256(manifest_path.read_bytes()).hexdigest(),
+            )
+        )
+
+    entries.sort(key=lambda entry: entry.relative_path)
+    frozen = FrozenStageCManifestV1(
+        created_at_utc=created_at_utc or _utc_now(),
+        feature_version=feature_version,
+        threshold_profile=threshold_profile,
+        samples=tuple(entries),
+    )
+    payload = json.dumps(
+        frozen.to_dict(),
+        ensure_ascii=False,
+        indent=2,
+        sort_keys=True,
+    )
+    try:
+        with output_path.open("x", encoding="utf-8", newline="\n") as stream:
+            stream.write(payload)
+            stream.write("\n")
+    except FileExistsError as exc:
+        raise StageCGateIntegrityError("frozen manifest output already exists") from exc
+    except BaseException:
+        output_path.unlink(missing_ok=True)
+        raise
+    return output_path
+
+
 def load_frozen_stage_c_manifest(path: Path) -> FrozenStageCManifestV1:
     if not isinstance(path, Path):
         raise TypeError("frozen manifest path must be a Path")
@@ -410,12 +551,24 @@ def evaluate_stage_c_results(
         (scenario.value, sum(result.scenario is scenario for result in rejected))
         for scenario in _REQUIRED_REJECTION_SCENARIOS
     )
+    review_outcome_counts = tuple(
+        (
+            outcome.value,
+            sum(result.review_outcome is outcome for result in results),
+        )
+        for outcome in (
+            StageCReviewOutcome.CANDIDATE_CONFIRMED,
+            StageCReviewOutcome.LEGAL_MOVE_CORRECTION,
+            StageCReviewOutcome.EXPECTED_REJECTION,
+        )
+    )
     metrics = HumanAiStageCMetrics(
         total_samples=len(results),
         valid_samples=len(valid),
         rejection_samples=len(rejected),
         distinct_valid_sessions=len({result.session_id for result in valid}),
         scenario_counts=scenario_counts,
+        review_outcome_counts=review_outcome_counts,
         accepted_samples=len(accepted),
         correct_accepts=correct_accepts,
         false_accepts=false_accepts,

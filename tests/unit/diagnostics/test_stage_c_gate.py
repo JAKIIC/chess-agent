@@ -4,6 +4,7 @@ from dataclasses import replace
 
 from xiangqi_agent.diagnostics.stage_c_gate import evaluate_stage_c_results
 from xiangqi_agent.diagnostics.stage_c_replay import HumanAiStageCReplayResult
+from xiangqi_agent.diagnostics.stage_c_review import StageCReviewOutcome
 from xiangqi_agent.diagnostics.stage_c_samples import StageCExpectedOutcome, StageCScenario
 
 REJECTION_SCENARIOS = (
@@ -22,6 +23,7 @@ def _valid_result(
     accepted: bool = True,
     session_id: str | None = None,
     latency_ms: float = 100.0,
+    review_outcome: StageCReviewOutcome | None = None,
 ) -> HumanAiStageCReplayResult:
     moves = ("h2e2", "h7e7") if accepted else ()
     return HumanAiStageCReplayResult(
@@ -43,6 +45,7 @@ def _valid_result(
         feature_version="two-ply-template-v1",
         threshold_profile_version="human-ai-two-ply-v1",
         runtime_ns=2_000_000,
+        review_outcome=review_outcome,
     )
 
 
@@ -51,6 +54,7 @@ def _rejection_result(
     *,
     scenario: StageCScenario | None = None,
     latency_ms: float = 100.0,
+    review_outcome: StageCReviewOutcome | None = None,
 ) -> HumanAiStageCReplayResult:
     chosen = scenario or REJECTION_SCENARIOS[index % len(REJECTION_SCENARIOS)]
     return HumanAiStageCReplayResult(
@@ -72,6 +76,7 @@ def _rejection_result(
         feature_version="two-ply-template-v1",
         threshold_profile_version="human-ai-two-ply-v1",
         runtime_ns=3_000_000,
+        review_outcome=review_outcome,
     )
 
 
@@ -226,3 +231,33 @@ def test_complete_safe_dataset_passes_all_hard_gates() -> None:
     assert report.metrics.accepted_precision == 1.0
     assert report.metrics.final_position_accuracy == 1.0
     assert report.metrics.p95_replay_runtime_ms == 3.0
+
+
+def test_review_outcome_metrics_count_only_reviewed_v2_provenance() -> None:
+    valid = tuple(
+        _valid_result(
+            index,
+            review_outcome=(
+                StageCReviewOutcome.CANDIDATE_CONFIRMED
+                if index < 10
+                else StageCReviewOutcome.LEGAL_MOVE_CORRECTION
+            ),
+        )
+        for index in range(20)
+    ) + tuple(_valid_result(index + 20) for index in range(10))
+    rejected = tuple(
+        _rejection_result(
+            index,
+            review_outcome=StageCReviewOutcome.EXPECTED_REJECTION,
+        )
+        for index in range(15)
+    ) + tuple(_rejection_result(index + 15) for index in range(15))
+
+    report = _report(valid=valid, rejected=rejected)
+
+    assert dict(report.metrics.review_outcome_counts) == {
+        "candidate_confirmed": 10,
+        "expected_rejection": 15,
+        "legal_move_correction": 10,
+    }
+    assert report.metrics.total_samples == 60

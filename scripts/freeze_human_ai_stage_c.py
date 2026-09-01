@@ -8,7 +8,7 @@ from pathlib import Path
 
 from xiangqi_agent.diagnostics.stage_c_gate import (
     StageCGateIntegrityError,
-    freeze_human_ai_stage_c,
+    freeze_reviewed_human_ai_stage_c,
     load_frozen_stage_c_manifest,
 )
 
@@ -16,7 +16,7 @@ from xiangqi_agent.diagnostics.stage_c_gate import (
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parse_args(argv)
     try:
-        output = freeze_human_ai_stage_c(args.sample_root, args.output)
+        output = freeze_reviewed_human_ai_stage_c(args.sample_root, args.output)
         manifest = load_frozen_stage_c_manifest(output)
     except (OSError, StageCGateIntegrityError, TypeError, ValueError) as exc:
         print(
