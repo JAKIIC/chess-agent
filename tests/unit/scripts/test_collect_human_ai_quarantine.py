@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from inspect import signature
 from pathlib import Path
 from threading import Event, Thread
 from time import monotonic, sleep
@@ -207,6 +208,14 @@ def test_unlabelled_collector_aborts_on_any_frame_resize(tmp_path: Path) -> None
 
     assert isinstance(outcome.get("error"), QuarantineCollectionError)
     assert not tuple(_quarantine_root(tmp_path).rglob("manifest.json"))
+
+
+def test_unlabelled_collector_uses_the_product_animation_quiet_window() -> None:
+    settle_default = signature(collect_human_ai_quarantine_event).parameters[
+        "settle_ms"
+    ].default
+
+    assert settle_default == 400
 
 
 @pytest.mark.parametrize(

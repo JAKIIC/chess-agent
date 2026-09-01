@@ -18,6 +18,7 @@ from uuid import uuid4
 
 import numpy as np
 
+from xiangqi_agent.capture.adaptive_sampling import DEFAULT_ANIMATION_SETTLE_MS
 from xiangqi_agent.capture.context import CaptureContext
 from xiangqi_agent.capture.protocol import (
     BurstFrameSource,
@@ -166,7 +167,7 @@ def collect_human_ai_quarantine_event(
     event_id: str | None = None,
     occupancy_observer: OccupancyObserver | None = None,
     patch_size: int = 48,
-    settle_ms: int = 100,
+    settle_ms: int = DEFAULT_ANIMATION_SETTLE_MS,
     stable_pairs: int = 2,
 ) -> Path:
     chosen_event_id = event_id or uuid4().hex

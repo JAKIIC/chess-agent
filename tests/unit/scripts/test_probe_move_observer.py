@@ -269,7 +269,7 @@ def test_probe_defaults_to_high_rate_capture_with_two_fps_steady_logic(
 
     assert args.fps == 2
     assert args.capture_fps == 20
-    assert args.settle_ms == 100
+    assert args.settle_ms == 400
     assert not args.record_endpoints
 
 

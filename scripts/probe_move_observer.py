@@ -14,6 +14,7 @@ from uuid import uuid4
 import numpy as np
 
 from xiangqi_agent.capture.adaptive_sampling import (
+    DEFAULT_ANIMATION_SETTLE_MS,
     AdaptiveBurstSampler,
     FrameSizeChangedError,
 )
@@ -509,7 +510,11 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--fps", type=int, default=2)
     parser.add_argument("--capture-fps", type=int, default=20)
-    parser.add_argument("--settle-ms", type=int, default=100)
+    parser.add_argument(
+        "--settle-ms",
+        type=int,
+        default=DEFAULT_ANIMATION_SETTLE_MS,
+    )
     parser.add_argument("--seconds", type=float, default=60.0)
     parser.add_argument("--baseline-timeout", type=float, default=10.0)
     parser.add_argument("--stable-pairs", type=int, default=2)

@@ -6,6 +6,7 @@ from xiangqi_agent.capture.protocol import CaptureFrame
 
 _NANOSECONDS_PER_SECOND = 1_000_000_000
 _NANOSECONDS_PER_MILLISECOND = 1_000_000
+DEFAULT_ANIMATION_SETTLE_MS = 400
 _VISUAL_TRIGGER_THRESHOLD = 12
 _VISUAL_SETTLE_THRESHOLD = 3
 _VISUAL_TRIGGER_STRIDE = 8
@@ -26,7 +27,7 @@ class AdaptiveBurstSampler:
         self,
         *,
         steady_fps: int = 2,
-        settle_ms: int = 400,
+        settle_ms: int = DEFAULT_ANIMATION_SETTLE_MS,
         stable_repeats: int = 2,
     ) -> None:
         self._steady_fps = _positive_integer("steady_fps", steady_fps)

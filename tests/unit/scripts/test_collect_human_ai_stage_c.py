@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from inspect import signature
 from pathlib import Path
 from threading import Event, Thread
 from time import monotonic, sleep
@@ -41,6 +42,14 @@ START = "rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w"
 CELL = 24
 PALETTE = {symbol: index * 15 for index, symbol in enumerate(".KABNRCPkabnrcp", start=1)}
 QUAD = parse_normalized_quad("0.0558,0.0502;0.9488,0.0502;0.9488,0.9540;0.0558,0.9540")
+
+
+def test_frozen_collector_uses_the_product_animation_quiet_window() -> None:
+    settle_default = signature(collect_human_ai_stage_c_event).parameters[
+        "settle_ms"
+    ].default
+
+    assert settle_default == 400
 
 
 def _render(board: BoardState) -> np.ndarray:

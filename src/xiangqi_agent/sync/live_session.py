@@ -10,6 +10,7 @@ from threading import Condition, Lock, Thread, current_thread
 from time import perf_counter_ns
 
 from xiangqi_agent.capture.adaptive_sampling import (
+    DEFAULT_ANIMATION_SETTLE_MS,
     AdaptiveBurstSampler,
     FrameSizeChangedError,
 )
@@ -147,7 +148,7 @@ class LiveSyncSession:
         on_update: Callable[[LiveSyncUpdate], None] | None = None,
         sync_mode: SyncMode = SyncMode.STRICT_SINGLE,
         steady_fps: int = 2,
-        settle_ms: int = 400,
+        settle_ms: int = DEFAULT_ANIMATION_SETTLE_MS,
         stable_pairs: int = 2,
         patch_size: int = 48,
         capture_transition_evidence: bool = False,
